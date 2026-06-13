@@ -1,0 +1,6 @@
+# frontend/.gitignore
+node_modules/
+.next/
+.env.local
+*.log
+.DS_Store
