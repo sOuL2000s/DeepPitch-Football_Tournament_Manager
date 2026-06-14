@@ -40,3 +40,5 @@ yarn-error.*
 /ios
 /android
 combined_project_files.txt
+
+.vercel
