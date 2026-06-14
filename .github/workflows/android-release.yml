@@ -13,7 +13,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version: 20
           cache: 'npm'
 
       - name: Setup Java
@@ -35,8 +35,10 @@ jobs:
         run: npm install -g eas-cli
 
       - name: Build APK (Local)
-        # Note: This builds a signed APK locally on the runner. 
-        # Requires a valid eas.json profile configured for local builds.
+        # Note: Even local builds require authentication to link the project.
+        # You must add EXPO_TOKEN to your GitHub Repository Secrets.
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: |
           eas build --platform android --profile preview --local --non-interactive --output=./DeepPitch.apk
 
