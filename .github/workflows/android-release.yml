@@ -13,7 +13,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: 'npm'
 
       - name: Setup Java
@@ -40,6 +40,8 @@ jobs:
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: |
+          # Link project to Expo account if not already configured
+          eas project:init --non-interactive
           eas build --platform android --profile preview --local --non-interactive --output=./DeepPitch.apk
 
       - name: Create Release
