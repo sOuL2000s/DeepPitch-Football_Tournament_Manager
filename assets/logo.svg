@@ -1,0 +1,19 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="256" height="256" fill="#050505"/>
+  <!-- Dynamic Pitch Shape with Depth -->
+  <path d="M50 180L128 220L206 180L206 76L128 36L50 76V180Z" stroke="#00FF66" stroke-width="12" stroke-linejoin="round"/>
+  <!-- Center Pitch Architecture -->
+  <path d="M50 128H206" stroke="#00FF66" stroke-width="8" stroke-opacity="0.4"/>
+  <circle cx="128" cy="128" r="34" stroke="#00FF66" stroke-width="8"/>
+  <circle cx="128" cy="128" r="10" fill="#00FF66"/>
+  <!-- Perspective Accents -->
+  <path d="M128 36V220" stroke="#FFFFFF" stroke-width="2" stroke-opacity="0.15"/>
+  <!-- Penalty Box Silhouettes -->
+  <path d="M98 36V65H158V36" stroke="#FFFFFF" stroke-width="4" stroke-opacity="0.3" stroke-linecap="round"/>
+  <path d="M98 220V191H158V220" stroke="#FFFFFF" stroke-width="4" stroke-opacity="0.3" stroke-linecap="round"/>
+  <!-- Corner Glows -->
+  <circle cx="50" cy="76" r="4" fill="#00FF66"/>
+  <circle cx="206" cy="76" r="4" fill="#00FF66"/>
+  <circle cx="50" cy="180" r="4" fill="#00FF66"/>
+  <circle cx="206" cy="180" r="4" fill="#00FF66"/>
+</svg>
