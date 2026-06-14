@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "DeepPitch-Football_Tournament_Manager",
-    "slug": "DeepPitch-Football_Tournament_Manager",
+    "slug": "deeppitch",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -26,8 +26,9 @@
     ],
     "extra": {
       "eas": {
-        "projectId": "" 
+        "projectId": "b7a9a2ee-ee43-40d5-a304-5a5d24c98165"
       }
-    }
+    },
+    "owner": "soul2000s"
   }
 }
