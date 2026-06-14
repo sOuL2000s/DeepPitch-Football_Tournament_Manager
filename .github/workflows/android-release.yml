@@ -2,6 +2,8 @@ name: Android Build
 on:
   push:
     branches: [ main, master ]
+    tags:
+      - 'v*'
 
 jobs:
   build:
