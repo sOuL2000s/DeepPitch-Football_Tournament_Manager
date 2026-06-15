@@ -80,12 +80,13 @@ export default function App() {
 
   // Form State
   const [name, setName] = useState('');
-  const [type, setType] = useState('LEAGUE'); // LEAGUE, KNOCKOUT, HOME_AWAY, GROUPS
+  const [type, setType] = useState('LEAGUE'); // LEAGUE, KNOCKOUT, GROUPS
   const [template, setTemplate] = useState('CUSTOM');
   const [teamsRaw, setTeamsRaw] = useState('');
   const [teamsPerGroup, setTeamsPerGroup] = useState('4');
   const [qualifiersCount, setQualifiersCount] = useState('2');
   const [tieBreakers, setTieBreakers] = useState(['GD', 'H2H', 'GS', 'FP']);
+  const [homeAwayEnabled, setHomeAwayEnabled] = useState(false); // New state for home/away matches
 
   useEffect(() => { load(); }, []);
 
@@ -284,9 +285,9 @@ export default function App() {
       id: Date.now().toString(),
       name, type,
       teams,
-      matches: generateMatches(teams, type, parseInt(teamsPerGroup), parseInt(qualifiersCount)),
+      matches: generateMatches(teams, type, parseInt(teamsPerGroup), parseInt(qualifiersCount), homeAwayEnabled),
       settings: { ptsWin: 3, ptsDraw: 1, ptsLoss: 0, tieBreakers },
-      config: { teamsPerGroup, qualifiersCount },
+      config: { teamsPerGroup, qualifiersCount, homeAwayEnabled }, // Store homeAwayEnabled in config
       status: 'ACTIVE'
     };
 
@@ -294,78 +295,168 @@ export default function App() {
     save(updated);
     setModal(false);
     setName(''); setTeamsRaw(''); setTemplate('CUSTOM');
+    setType('LEAGUE'); // Reset type to default
+    setTeamsPerGroup('4'); // Reset
+    setQualifiersCount('2'); // Reset
+    setTieBreakers(['GD', 'H2H', 'GS', 'FP']); // Reset
+    setHomeAwayEnabled(false); // Reset new homeAwayEnabled setting
     selectTournament(newTourney.id);
   };
 
-  function generateMatches(teams, mode, groupSize = 4, quals = 2) {
+  function generateMatches(teams, mode, groupSize = 4, quals = 2, isHomeAway = false) { // Added isHomeAway parameter
     const generateId = () => Math.random().toString(36).substr(2, 9);
     let matches = [];
-    
-    // Fisher-Yates Shuffle for better randomization of team pairings
+
+    // Fisher-Yates Shuffle for better randomization of team pairings initially
     let shuffledTeams = [...teams];
     for (let i = shuffledTeams.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [shuffledTeams[i], shuffledTeams[j]] = [shuffledTeams[j], shuffledTeams[i]];
     }
-    
+
     const teamIds = shuffledTeams.map(t => t.id); // Ensure we use team.id
 
-    if (mode === 'LEAGUE' || mode === 'HOME_AWAY') {
-      for (let i = 0; i < teamIds.length; i++) {
-        for (let j = i + 1; j < teamIds.length; j++) {
-          matches.push({ id: generateId(), home: teamIds[i], away: teamIds[j], hScore: '0', aScore: '0', done: false, events: [], status: 'PENDING', time: 0 });
-          if (mode === 'HOME_AWAY') 
-            matches.push({ id: generateId(), home: teamIds[j], away: teamIds[i], hScore: '0', aScore: '0', done: false, events: [], status: 'PENDING', time: 0 });
-        }
+    // Helper to generate Round-Robin matches (Circle Method)
+    const generateRoundRobin = (participants, roundOffset = 0, groupLabel = null, roundRobinHomeAway = false) => { // Added roundRobinHomeAway
+      let allRoundsMatches = []; // Accumulate matches for all rounds
+      let currentParticipants = [...participants];
+      const N = currentParticipants.length;
+
+      // Handle odd number of teams by adding a dummy 'BYE'
+      const hasBye = N % 2 !== 0;
+      if (hasBye) {
+        currentParticipants.push('BYE');
       }
-    } else if (mode === 'GROUPS') {
-      const numGroups = Math.ceil(teamIds.length / groupSize);
-      for (let g = 0; g < numGroups; g++) {
-        const groupTeams = teamIds.slice(g * groupSize, (g + 1) * groupSize);
-        const groupLabel = String.fromCharCode(65 + g);
-        for (let i = 0; i < groupTeams.length; i++) {
-          for (let j = i + 1; j < groupTeams.length; j++) {
-            matches.push({ id: generateId(), group: groupLabel, home: groupTeams[i], away: groupTeams[j], hScore: '0', aScore: '0', done: false, events: [], status: 'PENDING', time: 0 });
+      const numParticipants = currentParticipants.length; // Now guaranteed to be even
+      const numRounds = numParticipants - 1;
+
+      for (let r = 0; r < numRounds; r++) {
+        let matchesInThisRound = []; // Collect matches for the current round
+        for (let i = 0; i < numParticipants / 2; i++) {
+          const home = currentParticipants[i];
+          const away = currentParticipants[numParticipants - 1 - i];
+
+          if (home !== 'BYE' && away !== 'BYE') {
+            matchesInThisRound.push({
+              id: generateId(),
+              group: groupLabel,
+              round: r + 1 + roundOffset,
+              home: home,
+              away: away,
+              hScore: '0',
+              aScore: '0',
+              done: false,
+              events: [],
+              status: 'PENDING',
+              time: 0
+            });
+            if (roundRobinHomeAway) { // Use the new flag
+              matchesInThisRound.push({
+                id: generateId(),
+                group: groupLabel,
+                round: r + 1 + numRounds + roundOffset, // Second leg starts after first leg completes all rounds
+                home: away,
+                away: home,
+                hScore: '0',
+                aScore: '0',
+                done: false,
+                events: [],
+                status: 'PENDING',
+                time: 0
+              });
+            }
           }
         }
+        // Shuffle matches within this specific round for randomness
+        for (let i = matchesInThisRound.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [matchesInThisRound[i], matchesInThisRound[j]] = [matchesInThisRound[j], matchesInThisRound[i]];
+        }
+        allRoundsMatches.push(...matchesInThisRound); // Add all shuffled matches of this round
+
+        // Rotate all teams except the first one (which stays fixed in the top-left)
+        // Move last team to second position, shift others right
+        const last = currentParticipants.pop();
+        currentParticipants.splice(1, 0, last);
       }
-    } else {
-      // KNOCKOUT Logic (FIXED: Randomization of BYEs)
-      let roundParticipants = [...teamIds]; 
+      return allRoundsMatches; // Return all matches, ordered by round, with randomness within rounds
+    };
+
+    if (mode === 'LEAGUE') { // Removed 'HOME_AWAY' type, now handled by isHomeAway flag
+      matches = generateRoundRobin(teamIds, 0, null, isHomeAway); // Pass isHomeAway
+    } else if (mode === 'GROUPS') {
+      const actualNumGroups = Math.ceil(teamIds.length / groupSize);
+      const groups = Array.from({ length: actualNumGroups }, () => []);
+      
+      // Shuffle teamIds BEFORE distributing them into groups for random group assignment
+      let shuffledTeamIdsForGroups = [...teamIds];
+      for (let i = shuffledTeamIdsForGroups.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [shuffledTeamIdsForGroups[i], shuffledTeamIdsForGroups[j]] = [shuffledTeamIdsForGroups[j], shuffledTeamIdsForGroups[i]];
+      }
+
+      // Distribute teams evenly into groups using a round-robin assignment
+      shuffledTeamIdsForGroups.forEach((teamId, index) => { // Use shuffled list here
+        groups[index % actualNumGroups].push(teamId);
+      });
+
+      for (let g = 0; g < actualNumGroups; g++) {
+        const groupTeams = groups[g];
+        if (groupTeams.length > 0) { // Only generate matches if the group has teams
+          const groupLabel = String.fromCharCode(65 + g);
+          matches.push(...generateRoundRobin(groupTeams, 0, groupLabel, isHomeAway)); // Pass isHomeAway
+        }
+      }
+      // Sort matches by round (1, 2, 3), then by group (A, B, C) for display
+      matches.sort((a, b) => {
+        if ((a.round || 0) !== (b.round || 0)) return (a.round || 0) - (b.round || 0); // Primary sort by round
+        if (a.group && b.group && a.group !== b.group) return a.group.localeCompare(b.group); // Secondary sort by group
+        return 0;
+      });
+    } else { // KNOCKOUT
+      let roundParticipants = [...teamIds];
 
       const participantCount = roundParticipants.length;
       const nextPowerOfTwo = Math.pow(2, Math.ceil(Math.log2(participantCount)));
       const byes = nextPowerOfTwo - participantCount;
-      
+
       // Add BYEs
-      for(let i=0; i<byes; i++) roundParticipants.push('BYE');
-      
+      for (let i = 0; i < byes; i++) roundParticipants.push('BYE');
+
       // Re-shuffle all participants (teams + BYEs) to randomize BYE placement
+      // This shuffle is critical for fair initial pairings in knockouts
       for (let i = roundParticipants.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
         [roundParticipants[i], roundParticipants[j]] = [roundParticipants[j], roundParticipants[i]];
       }
 
       for (let i = 0; i < roundParticipants.length; i += 2) {
-        const home = roundParticipants[i], away = roundParticipants[i+1];
+        const home = roundParticipants[i], away = roundParticipants[i + 1];
         const isBye = away === 'BYE';
-        matches.push({ 
+        matches.push({
           id: generateId(), round: 1, roundIdx: i / 2,
-          home, away, hScore: isBye ? '1' : '0', aScore: isBye ? '0' : '0', 
+          home, away, hScore: isBye ? '1' : '0', aScore: isBye ? '0' : '0',
           done: isBye, winner: isBye ? home : null, events: [], status: isBye ? 'DONE' : 'PENDING', time: 0
         });
       }
+      // For Knockouts, initial round order can remain randomized after pairing.
+      // Further matches will be generated sequentially as results come in.
+      // A general random sort for initial knockout fixtures is acceptable.
+      matches.sort(() => Math.random() - 0.5);
     }
-
-    // Final shuffle of the entire matches array for randomized display order
-    return matches.sort(() => Math.random() - 0.5);
+    
+    // For LEAGUE, matches are already generated round-by-round and randomized within rounds.
+    // For GROUPS, matches are sorted by group then by round, with randomness within group rounds.
+    // This maintains the "match day" and "group completion" logic requested.
+    return matches;
   }
 
   const getTN = (id) => {
     if (id === 'BYE') return 'BYE';
     if (id === '?') return '?';
     const t = activeT?.teams.find(t => t.id === id);
-    return t ? t.name : id;
+    // Ensure the returned value is explicitly a string for rendering robustness
+    return String(t ? t.name : id);
   };
 
   const getTC = (id) => {
@@ -397,7 +488,8 @@ export default function App() {
               activeT.teams, 
               activeT.type, 
               parseInt(activeT.config?.teamsPerGroup || 4), 
-              parseInt(activeT.config?.qualifiersCount || 2)
+              parseInt(activeT.config?.qualifiersCount || 2),
+              activeT.config?.homeAwayEnabled || false // Pass homeAwayEnabled from active tournament config
             );
             const updated = tournaments.map(t => {
               if (t.id === activeID) { return { ...t, matches: newMatches }; }
@@ -488,11 +580,25 @@ export default function App() {
   };
 
   const getStats = (t) => {
-    if (!t || !t.teams) return [];
+    if (!t || !t.teams || !t.matches) return []; // Ensure matches exist
     let stats = {};
-    t.teams.forEach(tm => stats[tm.id] = { id: tm.id, p: 0, w: 0, d: 0, l: 0, pts: 0, gd: 0, gs: 0, fp: 0 });
+    
+    // Collect all unique team IDs that actually appear in the provided matches
+    const uniqueTeamIdsInMatches = new Set();
+    t.matches.forEach(m => {
+        if (m.home !== 'BYE') uniqueTeamIdsInMatches.add(m.home);
+        if (m.away !== 'BYE') uniqueTeamIdsInMatches.add(m.away);
+    });
+
+    // Initialize stats only for teams relevant to the current set of matches
+    t.teams.forEach(tm => {
+        if (uniqueTeamIdsInMatches.has(tm.id)) {
+            stats[tm.id] = { id: tm.id, p: 0, w: 0, d: 0, l: 0, pts: 0, gd: 0, gs: 0, fp: 0 };
+        }
+    });
     
     t.matches.forEach(m => {
+      // Only process matches where both home and away teams exist in our stats object
       if (m.done && m.away !== 'BYE' && stats[m.home] && stats[m.away]) {
         const hs = parseInt(m.hScore) || 0, as = parseInt(m.aScore) || 0;
         const h = stats[m.home], a = stats[m.away];
@@ -502,7 +608,7 @@ export default function App() {
         
         (m.events || []).forEach(e => {
           if (e.type === 'YELLOW') { if (e.teamId === m.home) h.fp -= 1; else a.fp -= 1; }
-          if (e.type === 'RED') { if (e.teamId === m.home) h.fp -= 3; else a.fp -= 3; }
+          if (e.type === 'RED') { if (e.teamId === m.home) h.fp -= 3; else a.fp -= 3; } // Corrected red card penalty for away team
         });
 
         if (hs > as) { h.w++; a.l++; h.pts += t.settings.ptsWin; }
@@ -655,23 +761,75 @@ export default function App() {
       </View>
 
       {screen === 'HOME' ? (
-        <ScrollView contentContainerStyle={{ padding: 20 }}>
-          <Text style={styles.label}>Active Tournaments</Text>
-          {tournaments.map(t => (
-            <TouchableOpacity key={t.id} style={styles.tCard} onPress={() => selectTournament(t.id)}>
-              <View>
-                <Text style={styles.tName}>{t.name}</Text>
-                <Text style={styles.tSub}>{t.type.replace('_', ' ')} • {t.teams.length} Teams</Text>
-              </View>
-              <Icons.ChevronRight color={COLORS.muted} />
-            </TouchableOpacity>
-          ))}
-          {tournaments.length === 0 && (
-            <View style={{padding: 40, alignItems: 'center'}}>
-              <Icons.Trophy color={COLORS.border} size={48} />
-              <Text style={{color: COLORS.muted, marginTop: 10}}>Start your first tournament</Text>
+        <ScrollView contentContainerStyle={{ paddingBottom: 40 }}>
+          {/* Hero Section */}
+          <View style={styles.hero}>
+            <View>
+              <Text style={styles.heroTitle}>Tournament</Text>
+              <Text style={[styles.heroTitle, { color: COLORS.primary }]}>Command Center</Text>
+              <Text style={styles.heroSub}>{tournaments.length} Active Competitions</Text>
             </View>
-          )}
+            <View style={styles.heroIconCircle}>
+              <Icons.Trophy color={COLORS.primary} size={32} />
+            </View>
+          </View>
+
+          <View style={{ paddingHorizontal: 20 }}>
+            {/* Quick Actions */}
+            <Text style={styles.sectionLabel}>Quick Actions</Text>
+            <TouchableOpacity 
+              style={styles.createMainBtn} 
+              onPress={() => setModal(true)}
+            >
+              <View style={styles.createMainBtnIcon}>
+                <Icons.Plus color="#000" size={24} />
+              </View>
+              <View>
+                <Text style={styles.createMainBtnTitle}>Create New Tournament</Text>
+                <Text style={styles.createMainBtnSub}>League, Knockout, or Group Stage</Text>
+              </View>
+            </TouchableOpacity>
+
+            {/* Tournaments List */}
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 25, marginBottom: 15 }}>
+              <Text style={[styles.sectionLabel, { marginBottom: 0 }]}>Recent Tournaments</Text>
+              {tournaments.length > 0 && <Text style={{ color: COLORS.muted, fontSize: 10 }}>{tournaments.length} TOTAL</Text>}
+            </View>
+
+            {tournaments.length === 0 ? (
+              <View style={styles.emptyState}>
+                <View style={styles.emptyIconCircle}>
+                  <Icons.LayoutGrid color={COLORS.border} size={40} />
+                </View>
+                <Text style={styles.emptyText}>No tournaments found</Text>
+                <Text style={styles.emptySub}>Start by creating your first professional bracket or league.</Text>
+                <TouchableOpacity style={styles.emptyBtn} onPress={() => setModal(true)}>
+                  <Text style={styles.emptyBtnText}>GET STARTED</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              tournaments.map(t => (
+                <TouchableOpacity key={t.id} style={styles.tCard} onPress={() => selectTournament(t.id)}>
+                  <View style={styles.tCardIcon}>
+                    {(typeof t.type === 'string' && t.type === 'LEAGUE' && Icons.Trophy) ? <Icons.Trophy color={COLORS.gold} size={18} /> : 
+                     (typeof t.type === 'string' && t.type === 'KNOCKOUT' && Icons.Zap) ? <Icons.Zap color={COLORS.accent} size={18} /> : 
+                     (typeof t.type === 'string' && t.type === 'GROUPS' && Icons.LayoutGrid) ? <Icons.LayoutGrid color={COLORS.primary} size={18} /> :
+                     (Icons.CircleDot ? <Icons.CircleDot color={COLORS.muted} size={18} /> : null)}
+                  </View>
+                  <View style={{ flex: 1, marginLeft: 15 }}>
+                    <Text style={styles.tName}>{t.name}</Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                      <View style={styles.typeTag}>
+                        <Text style={styles.typeTagText}>{t.type.replace('_', ' ')}</Text>
+                      </View>
+                      <Text style={styles.tSub}>{t.teams.length} Teams</Text>
+                    </View>
+                  </View>
+                  <Icons.ChevronRight color={COLORS.border} size={20} />
+                </TouchableOpacity>
+              ))
+            )}
+          </View>
         </ScrollView>
       ) : (
         activeT ? (
@@ -679,7 +837,7 @@ export default function App() {
             <View style={styles.tabBar}>
               {['FIXTURES', 'STANDINGS', 'TEAMS', 'STATS', 'BRACKET'].map(tab => {
                 if (tab === 'BRACKET' && activeT.type === 'LEAGUE' && !activeT.matches.some(m => m.round)) return null;
-                if (tab === 'BRACKET' && activeT.type === 'HOME_AWAY') return null;
+                // 'HOME_AWAY' type is now absorbed into LEAGUE/GROUPS with a flag, so remove this specific check
                 return (
                   <TouchableOpacity key={tab} onPress={() => setActiveTab(tab)} style={[styles.tab, activeTab === tab && styles.activeTab]}>
                     <Text style={[styles.tabText, activeTab === tab && {color: COLORS.primary}]}>{tab}</Text>
@@ -831,6 +989,17 @@ export default function App() {
                       rounds.push(knockoutMatches.filter(m => m.round === r));
                     }
                     
+                    if (rounds.length === 0) {
+                      return (
+                        <View style={{flex: 1, alignItems: 'center', justifyContent: 'center', minWidth: width - 40}}>
+                          <Icons.Info color={COLORS.muted} size={24} />
+                          <Text style={{color: COLORS.muted, marginTop: 10, textAlign: 'center'}}>
+                            No knockout matches generated yet or tournament not in knockout stage.
+                          </Text>
+                        </View>
+                      );
+                    }
+
                     return rounds.map((roundMatches, rIdx) => {
                       const roundNum = rIdx + 1;
                       let roundName = `ROUND ${roundNum}`;
@@ -882,11 +1051,11 @@ export default function App() {
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{marginBottom: 15, maxHeight: 40}}>
               {[
                 {id: 'CUSTOM', n: 'Custom'},
-                {id: 'WC', n: 'World Cup (32)', t: 'GROUPS', g: '4', q: '2'},
-                {id: 'UCL', n: 'UCL (32)', t: 'GROUPS', g: '4', q: '2'},
-                {id: 'EURO', n: 'Euro (24)', t: 'GROUPS', g: '4', q: '2'},
-                {id: 'KO16', n: 'Bracket (16)', t: 'KNOCKOUT'},
-                {id: 'L10', n: 'League (10)', t: 'LEAGUE'}
+                {id: 'WC', n: 'World Cup (32)', t: 'GROUPS', g: '4', q: '2', ha: false},
+                {id: 'UCL', n: 'UCL (32)', t: 'GROUPS', g: '4', q: '2', ha: true},
+                {id: 'EURO', n: 'Euro (24)', t: 'GROUPS', g: '4', q: '2', ha: false},
+                {id: 'KO16', n: 'Bracket (16)', t: 'KNOCKOUT', ha: false},
+                {id: 'L10', n: 'League (10)', t: 'LEAGUE', ha: true}
               ].map(tmp => (
                 <TouchableOpacity 
                   key={tmp.id} 
@@ -896,7 +1065,29 @@ export default function App() {
                     if (tmp.t) setType(tmp.t);
                     if (tmp.g) setTeamsPerGroup(tmp.g);
                     if (tmp.q) setQualifiersCount(tmp.q);
+                    if (tmp.ha !== undefined) setHomeAwayEnabled(tmp.ha); // Set homeAwayEnabled based on template
                     if (name === '') setName(tmp.n + ' Tournament');
+                    
+                    // Pre-fill teams based on template
+                    let prefilledTeams = '';
+                    switch (tmp.id) {
+                      case 'WC':
+                      case 'UCL':
+                        prefilledTeams = 'Real Madrid, Barcelona, Bayern Munich, Liverpool, Man City, PSG, Juventus, Man United, Chelsea, Arsenal, AC Milan, Inter Milan, Atletico Madrid, Borussia Dortmund, Tottenham, Napoli, Benfica, Porto, Ajax, Feyenoord, Roma, Lazio, Sevilla, Villarreal, RB Leipzig, Bayer Leverkusen, Celtic, Rangers, Galatasaray, Besiktas, Marseille, Lyon';
+                        break;
+                      case 'EURO':
+                        prefilledTeams = 'England, France, Germany, Spain, Italy, Portugal, Netherlands, Belgium, Croatia, Switzerland, Denmark, Austria, Serbia, Scotland, Turkey, Ukraine, Poland, Hungary, Czech Republic, Slovakia, Romania, Slovenia, Albania, Georgia';
+                        break;
+                      case 'KO16':
+                        prefilledTeams = 'Team A, Team B, Team C, Team D, Team E, Team F, Team G, Team H, Team I, Team J, Team K, Team L, Team M, Team N, Team O, Team P';
+                        break;
+                      case 'L10':
+                        prefilledTeams = 'Dragons, Phoenix, Titans, Warriors, Spartans, Knights, Vikings, Hawks, Falcons, Bears';
+                        break;
+                      default:
+                        prefilledTeams = '';
+                    }
+                    setTeamsRaw(prefilledTeams);
                   }}
                 >
                   <Text style={{color: template === tmp.id ? COLORS.primary : '#fff', fontSize: 10, fontWeight: 'bold'}}>{tmp.n}</Text>
@@ -906,7 +1097,7 @@ export default function App() {
 
             <TextInput style={styles.input} placeholder="Tournament Name" placeholderTextColor="#666" value={name} onChangeText={setName} />
             <View style={styles.typeRow}>
-              {['LEAGUE', 'KNOCKOUT', 'GROUPS'].map(m => (
+              {['LEAGUE', 'KNOCKOUT', 'GROUPS'].map(m => ( // Removed 'HOME_AWAY' type
                 <TouchableOpacity key={m} style={[styles.typeBtn, type === m && {borderColor: COLORS.primary, borderWidth: 1}]} onPress={() => setType(m)}>
                   <Text style={{color: type === m ? COLORS.primary : '#fff', fontSize: 10, fontWeight: 'bold'}}>{m}</Text>
                 </TouchableOpacity>
@@ -916,6 +1107,25 @@ export default function App() {
               <View style={{flexDirection: 'row', gap: 10, marginBottom: 15}}>
                 <TextInput style={[styles.input, {flex: 1}]} placeholder="Teams/Group" keyboardType="numeric" value={teamsPerGroup} onChangeText={setTeamsPerGroup} />
                 <TextInput style={[styles.input, {flex: 1}]} placeholder="Qualifiers" keyboardType="numeric" value={qualifiersCount} onChangeText={setQualifiersCount} />
+              </View>
+            )}
+            {(type === 'LEAGUE' || type === 'GROUPS') && (
+              <View style={{ marginBottom: 15 }}>
+                <Text style={[styles.label, { fontSize: 10 }]}>Match Format</Text>
+                <View style={styles.typeRow}>
+                  <TouchableOpacity
+                    style={[styles.typeBtn, !homeAwayEnabled && { borderColor: COLORS.primary, borderWidth: 1 }]}
+                    onPress={() => setHomeAwayEnabled(false)}
+                  >
+                    <Text style={{ color: !homeAwayEnabled ? COLORS.primary : '#fff', fontSize: 10, fontWeight: 'bold' }}>SINGLE ENCOUNTER</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.typeBtn, homeAwayEnabled && { borderColor: COLORS.primary, borderWidth: 1 }]}
+                    onPress={() => setHomeAwayEnabled(true)}
+                  >
+                    <Text style={{ color: homeAwayEnabled ? COLORS.primary : '#fff', fontSize: 10, fontWeight: 'bold' }}>HOME & AWAY</Text>
+                  </TouchableOpacity>
+                </View>
               </View>
             )}
             {(type === 'LEAGUE' || type === 'GROUPS') && (
@@ -942,7 +1152,7 @@ export default function App() {
               } teams</Text>}
             </View>
             <TextInput style={[styles.input, {height: 80}]} multiline placeholder="Team 1, Team 2, Team 3..." placeholderTextColor="#666" value={teamsRaw} onChangeText={setTeamsRaw} />
-            <TouchableOpacity style={styles.btn} onPress={createTournament}><Text style={styles.btnText}>GENERATE BRACKET</Text></TouchableOpacity>
+            <TouchableOpacity style={styles.btn} onPress={createTournament}><Text style={styles.btnText}>CREATE TOURNAMENT</Text></TouchableOpacity>
             <TouchableOpacity onPress={() => setModal(false)}><Text style={{color: COLORS.danger, textAlign: 'center', marginTop: 15}}>Cancel</Text></TouchableOpacity>
           </View>
         </View>
@@ -952,7 +1162,7 @@ export default function App() {
         <View style={styles.modal}>
           <View style={[styles.modalContent, {maxHeight: '85%'}]}>
             {editingTeam && activeT && (
-              <ScrollView>
+              <ScrollView keyboardShouldPersistTaps="handled">
                 <Text style={styles.modalTitle}>Edit {editingTeam.name}</Text>
                 
                 <Text style={styles.label}>Team Details</Text>
@@ -1076,7 +1286,7 @@ export default function App() {
                   )}
                 </View>
 
-                <ScrollView>
+                <ScrollView keyboardShouldPersistTaps="handled">
                   <Text style={styles.label}>Match Events</Text>
                   {(selectedMatch.events || []).map((ev, i) => (
                     <View key={i} style={styles.eventRow}>
@@ -1099,25 +1309,25 @@ export default function App() {
                             <View key={p.id} style={{marginRight: 10, gap: 5}}>
                               <Text style={{color: '#fff', fontSize: 10}}>{p.number}. {p.name}</Text>
                               <View style={{flexDirection: 'row', gap: 5}}>
-                                <TouchableOpacity style={styles.actionBtn} onPress={() => {
+                                <TouchableOpacity style={[styles.actionBtn, {width: 32, height: 32, borderRadius: 6}]} onPress={() => {
                                   const ev = { type: 'GOAL', player: p.name, teamId, id: Date.now() };
                                   const newEvents = [...(selectedMatch.events || []), ev];
                                   setSelectedMatch({ ...selectedMatch, events: newEvents });
                                   updateMatch(activeT.id, selectedMatch.id, '', '', newEvents);
                                 }}><Icons.Zap color={COLORS.primary} size={12} /></TouchableOpacity>
-                                <TouchableOpacity style={[styles.actionBtn, {borderColor: '#FFCC00'}]} onPress={() => {
+                                <TouchableOpacity style={[styles.actionBtn, {borderColor: '#FFCC00', width: 32, height: 32, borderRadius: 6}]} onPress={() => {
                                   const ev = { type: 'YELLOW', player: p.name, teamId, id: Date.now() };
                                   const newEvents = [...(selectedMatch.events || []), ev];
                                   setSelectedMatch({ ...selectedMatch, events: newEvents });
                                   updateMatch(activeT.id, selectedMatch.id, '', '', newEvents);
                                 }}><Icons.Square color="#FFCC00" size={12} fill="#FFCC00" /></TouchableOpacity>
-                                <TouchableOpacity style={[styles.actionBtn, {borderColor: COLORS.danger}]} onPress={() => {
+                                <TouchableOpacity style={[styles.actionBtn, {borderColor: COLORS.danger, width: 32, height: 32, borderRadius: 6}]} onPress={() => {
                                   const ev = { type: 'RED', player: p.name, teamId, id: Date.now() };
                                   const newEvents = [...(selectedMatch.events || []), ev];
                                   setSelectedMatch({ ...selectedMatch, events: newEvents });
                                   updateMatch(activeT.id, selectedMatch.id, '', '', newEvents);
                                 }}><Icons.Square color={COLORS.danger} size={12} fill={COLORS.danger} /></TouchableOpacity>
-                                <TouchableOpacity style={[styles.actionBtn, {borderColor: COLORS.accent}]} onPress={() => {
+                                <TouchableOpacity style={[styles.actionBtn, {borderColor: COLORS.accent, width: 32, height: 32, borderRadius: 6}]} onPress={() => {
                                   const ev = { type: 'ASSIST', player: p.name, teamId, id: Date.now() };
                                   const newEvents = [...(selectedMatch.events || []), ev];
                                   setSelectedMatch({ ...selectedMatch, events: newEvents });
@@ -1144,7 +1354,8 @@ export default function App() {
       {loading && (
         <View style={styles.loadingOverlay}>
           <ActivityIndicator size="large" color={COLORS.primary} />
-          <Text style={{color: '#fff', marginTop: 10, fontWeight: 'bold'}}>ENGINE PROCESSING...</Text>
+          <Text style={{color: '#fff', marginTop: 15, fontSize: 16, fontWeight: 'bold'}}>DEEPPITCH ENGINE</Text>
+          <Text style={{color: COLORS.muted, marginTop: 5, fontSize: 12}}>Processing your request securely...</Text>
         </View>
       )}
 
@@ -1167,12 +1378,42 @@ const StandingsTable = ({ data, resolveName }) => (
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.bg },
-  header: { flexDirection: 'row', justifyContent: 'space-between', padding: 20, alignItems: 'center' },
-  logo: { color: '#fff', fontSize: 24, fontWeight: '900', letterSpacing: -1 },
-  label: { color: COLORS.primary, fontWeight: 'bold', marginBottom: 10, textTransform: 'uppercase', fontSize: 12 },
-  tCard: { backgroundColor: COLORS.card, padding: 20, borderRadius: 15, marginBottom: 10, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderWidth: 1, borderColor: COLORS.border },
-  tName: { color: '#fff', fontSize: 18, fontWeight: '700' },
+  header: { flexDirection: 'row', justifyContent: 'space-between', padding: 20, alignItems: 'center', borderBottomWidth: 1, borderBottomColor: COLORS.card },
+  logo: { color: '#fff', fontSize: 20, fontWeight: '900', letterSpacing: -1 },
+  
+  // Hero Section
+  hero: { padding: 30, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  heroTitle: { fontSize: 32, fontWeight: '900', color: '#fff', lineHeight: 34, letterSpacing: -1 },
+  heroSub: { color: COLORS.muted, fontSize: 14, marginTop: 8, fontWeight: '500' },
+  heroIconCircle: { width: 60, height: 60, borderRadius: 30, backgroundColor: COLORS.primary + '15', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: COLORS.primary + '30' },
+  
+  // Section Headings
+  sectionLabel: { color: COLORS.muted, fontWeight: 'bold', marginBottom: 15, textTransform: 'uppercase', fontSize: 11, letterSpacing: 1 },
+  
+  // Main Action Button
+  createMainBtn: { backgroundColor: COLORS.card, padding: 20, borderRadius: 20, flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: COLORS.border, gap: 15 },
+  createMainBtnIcon: { width: 44, height: 44, borderRadius: 12, backgroundColor: COLORS.primary, alignItems: 'center', justifyContent: 'center' },
+  createMainBtnTitle: { color: '#fff', fontSize: 16, fontWeight: '800' },
+  createMainBtnSub: { color: COLORS.muted, fontSize: 12, marginTop: 2 },
+
+  // Tournament Cards
+  tCard: { backgroundColor: COLORS.card, padding: 16, borderRadius: 16, marginBottom: 12, flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: COLORS.border },
+  tCardIcon: { width: 40, height: 40, borderRadius: 10, backgroundColor: COLORS.secondary, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: COLORS.border },
+  tName: { color: '#fff', fontSize: 16, fontWeight: '700' },
   tSub: { color: COLORS.muted, fontSize: 12 },
+  typeTag: { backgroundColor: COLORS.secondary, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 4, borderWidth: 1, borderColor: COLORS.border },
+  typeTagText: { color: COLORS.primary, fontSize: 9, fontWeight: 'bold', textTransform: 'uppercase' },
+
+  // Empty State
+  emptyState: { padding: 40, alignItems: 'center', backgroundColor: COLORS.card, borderRadius: 24, marginTop: 20, borderStyle: 'dashed', borderWidth: 1, borderColor: COLORS.border },
+  emptyIconCircle: { width: 80, height: 80, borderRadius: 40, backgroundColor: COLORS.secondary, alignItems: 'center', justifyContent: 'center', marginBottom: 20 },
+  emptyText: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
+  emptySub: { color: COLORS.muted, textAlign: 'center', marginTop: 8, fontSize: 13, lineHeight: 18 },
+  emptyBtn: { marginTop: 25, backgroundColor: COLORS.primary, paddingHorizontal: 30, paddingVertical: 12, borderRadius: 10 },
+  emptyBtnText: { fontWeight: '900', color: '#000', fontSize: 12 },
+
+  // Shared Styles
+  label: { color: COLORS.primary, fontWeight: 'bold', marginBottom: 10, textTransform: 'uppercase', fontSize: 12 },
   modal: { flex: 1, backgroundColor: 'rgba(0,0,0,0.9)', justifyContent: 'center', padding: 20 },
   modalContent: { backgroundColor: COLORS.card, padding: 25, borderRadius: 20, borderWidth: 1, borderColor: COLORS.primary },
   modalTitle: { color: '#fff', fontSize: 20, fontWeight: 'bold', marginBottom: 20 },
@@ -1186,7 +1427,6 @@ const styles = StyleSheet.create({
   cell: { color: '#fff', flex: 1, textAlign: 'center', fontSize: 12 },
   match: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.card, padding: 15, borderRadius: 10, marginBottom: 8, gap: 10 },
   mTeam: { color: '#fff', flex: 1, fontSize: 13, fontWeight: '600' },
-  mInput: { backgroundColor: COLORS.secondary, color: COLORS.primary, width: 40, height: 40, textAlign: 'center', borderRadius: 8, fontWeight: 'bold', fontSize: 16 },
   mTag: { fontSize: 8, color: COLORS.muted, fontWeight: '900', marginBottom: 2 },
   tabBar: { flexDirection: 'row', paddingHorizontal: 15, borderBottomWidth: 1, borderColor: COLORS.border },
   tab: { paddingVertical: 15, marginRight: 20, borderBottomWidth: 2, borderColor: 'transparent' },
@@ -1198,12 +1438,18 @@ const styles = StyleSheet.create({
   scoreBadge: { borderWidth: 1, borderColor: COLORS.border, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6, minWidth: 60, alignItems: 'center', backgroundColor: COLORS.secondary },
   scoreText: { color: COLORS.muted, fontSize: 13, fontWeight: '900' },
   eventRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.secondary, padding: 8, borderRadius: 6, marginBottom: 5 },
-  actionBtn: { width: 24, height: 24, borderRadius: 4, borderWidth: 1, borderColor: COLORS.primary, alignItems: 'center', justifyContent: 'center' },
+  actionBtn: { width: 32, height: 32, borderRadius: 6, borderWidth: 1, borderColor: COLORS.primary, alignItems: 'center', justifyContent: 'center' },
   bracketNode: { backgroundColor: COLORS.card, borderRadius: 8, borderWidth: 1, borderColor: COLORS.border, marginVertical: 10, overflow: 'hidden' },
   bracketTeam: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 10, height: 40 },
   bracketTeamText: { color: '#fff', fontSize: 11, fontWeight: '600', flex: 1 },
   bracketScore: { color: COLORS.gold, fontWeight: 'bold', fontSize: 12, marginLeft: 5, width: 20, textAlign: 'right' },
   miniBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.secondary, paddingVertical: 6, paddingHorizontal: 12, borderRadius: 6, gap: 5, borderWidth: 1, borderColor: COLORS.border },
   miniBtnText: { color: '#fff', fontSize: 10, fontWeight: 'bold' },
-  loadingOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.85)', justifyContent: 'center', alignItems: 'center', zIndex: 9999 }
+  loadingOverlay: { 
+    ...StyleSheet.absoluteFillObject, 
+    backgroundColor: 'rgba(0,0,0,0.95)', // Make it a bit darker
+    justifyContent: 'center', 
+    alignItems: 'center', 
+    zIndex: 9999 
+  }
 });
