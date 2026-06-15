@@ -1,14 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput, 
-  Modal, Alert, StatusBar, Dimensions, Share, Platform 
+  Modal, Alert, StatusBar, Dimensions, Share, Platform, BackHandler, ToastAndroid,
+  ActivityIndicator
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Icons from 'lucide-react-native';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import { captureRef } from 'react-native-view-shot';
 
 const { width } = Dimensions.get('window');
@@ -20,9 +21,14 @@ const COLORS = {
   gold: '#FFD700'
 };
 
-// Vercel Serverless Function Endpoint
-// FIX: Updated to match the actual Vercel deployment domain.
-const SERVERLESS_ENDPOINT = 'https://deeppitch-engine.vercel.app/api'; 
+// Backend Endpoint Configuration
+// Use your local IP address (e.g., '192.168.1.5') if testing on a physical device.
+// Use '10.0.2.2' for Android Emulator.
+// NOTE: 10.0.2.2 is ONLY for Android Emulators. 
+// If using a physical device, change DEV_URL to your computer's IP (e.g., 'http://192.168.1.5:3000/api')
+const DEV_URL = 'http://192.168.29.203:3000/api'; 
+const PROD_URL = 'https://deeppitch-engine.vercel.app/api';
+const SERVERLESS_ENDPOINT = __DEV__ ? DEV_URL : PROD_URL;
 
 export default function App() {
   const [screen, setScreen] = useState('HOME'); // HOME, MANAGE
@@ -34,8 +40,43 @@ export default function App() {
   const [selectedMatch, setSelectedMatch] = useState(null);
   const [teamModal, setTeamModal] = useState(false);
   const [editingTeam, setEditingTeam] = useState(null);
+  const [loading, setLoading] = useState(false);
   const standingsRef = useRef();
   const bracketRef = useRef();
+  const backPressCount = useRef(0);
+
+  useEffect(() => {
+    const backAction = () => {
+      // Priority 1: Close Modals
+      if (matchModal) { setMatchModal(false); return true; }
+      if (teamModal) { setTeamModal(false); return true; }
+      if (modal) { setModal(false); return true; }
+
+      // Priority 2: Navigation
+      if (screen === 'MANAGE') {
+        goHome();
+        return true;
+      }
+
+      // Priority 3: Exit App (Home Screen)
+      if (screen === 'HOME') {
+        if (backPressCount.current === 1) {
+          BackHandler.exitApp();
+        } else {
+          backPressCount.current = 1;
+          if (Platform.OS === 'android') {
+            ToastAndroid.show('Press back twice to exit', ToastAndroid.SHORT);
+          }
+          setTimeout(() => { backPressCount.current = 0; }, 2000);
+          return true;
+        }
+      }
+      return false;
+    };
+
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', backAction);
+    return () => backHandler.remove();
+  }, [screen, modal, matchModal, teamModal]);
 
   // Form State
   const [name, setName] = useState('');
@@ -106,54 +147,113 @@ export default function App() {
       .replace(/'/g, "&#039;");
   };
 
+  // --- THE FINAL PERMANENT FIX ---
+  const saveAndSharePdf = async (base64Data, baseName) => {
+    try {
+      // 1. Create a clean filename
+      const cleanName = baseName.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+      
+      // 2. Use cacheDirectory (best for sharing)
+      const destinationUri = `${FileSystem.cacheDirectory}${cleanName}.pdf`;
+
+      // 3. Write the file using the legacy method (Base64 encoding)
+      // This works because we are creating a NEW file, not reading a restricted one
+      await FileSystem.writeAsStringAsync(destinationUri, base64Data, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+
+      // 4. Share the file
+      await Sharing.shareAsync(destinationUri, {
+        mimeType: 'application/pdf',
+        dialogTitle: `Share ${baseName}`,
+        UTI: 'com.adobe.pdf'
+      });
+    } catch (error) {
+      console.error("Internal Share Error:", error);
+      Alert.alert("Export Error", "Failed to prepare PDF. Please try again.");
+    }
+  };
+
+  const generateMarkdownReport = (t) => {
+    if (!t) return "";
+    let report = `🏆 *${t.name.toUpperCase()}*\n`;
+    report += `Format: ${t.type.replace('_', ' ')} | Teams: ${t.teams.length}\n`;
+    report += `----------------------------------\n\n`;
+
+    // 1. Standings
+    report += `📊 *STANDINGS*\n`;
+    if (t.type === 'GROUPS') {
+      const groups = [...new Set(t.matches.filter(m => m.group).map(m => m.group))].sort();
+      groups.forEach(g => {
+        report += `\n*GROUP ${g}*\n`;
+        report += `Team | P | GD | PTS\n`;
+        const groupStats = getStats({...t, matches: t.matches.filter(m => m.group === g)});
+        groupStats.forEach(([id, s]) => {
+          report += `${getTN(id)} | ${s.p} | ${s.gd} | ${s.pts}\n`;
+        });
+      });
+    } else {
+      report += `Pos | Team | P | GD | PTS\n`;
+      const stats = getStats(t);
+      stats.forEach(([id, s], i) => {
+        report += `${i + 1}. ${getTN(id)} | ${s.p} | ${s.gd} | ${s.pts}\n`;
+      });
+    }
+    report += `\n`;
+
+    // 2. Statistics
+    const { scorers, assisters, cards } = getPlayerStats(t);
+    report += `⚽ *PLAYER STATISTICS*\n`;
+    if (scorers.length > 0) {
+      report += `Top Scorers:\n`;
+      scorers.slice(0, 5).forEach(([name, count]) => report += `• ${name}: ${count} G\n`);
+    }
+    if (assisters.length > 0) {
+      report += `Top Assists:\n`;
+      assisters.slice(0, 5).forEach(([name, count]) => report += `• ${name}: ${count} A\n`);
+    }
+    report += `\n`;
+
+    // 3. Fixtures & Results
+    report += `🗓️ *FIXTURES & RESULTS*\n`;
+    const sortedMatches = [...t.matches].sort((a, b) => {
+      if (a.round !== b.round) return (a.round || 0) - (b.round || 0);
+      if (a.group !== b.group) return (a.group || "").localeCompare(b.group || "");
+      return 0;
+    });
+
+    sortedMatches.forEach(m => {
+      if (m.away === 'BYE') return;
+      const matchType = m.round ? `Round ${m.round}` : (m.group ? `Group ${m.group}` : "Match");
+      const score = m.done ? `${m.hScore} - ${m.aScore}` : (m.status === 'LIVE' ? "LIVE" : "VS");
+      report += `[${matchType}] ${getTN(m.home)} ${score} ${getTN(m.away)}\n`;
+      if (m.events && m.events.length > 0) {
+        m.events.forEach(e => {
+          report += `  - ${e.type}: ${e.player} (${getTN(e.teamId)})\n`;
+        });
+      }
+    });
+    report += `\n`;
+
+    // 4. Rosters
+    report += `👥 *TEAM ROSTERS*\n`;
+    t.teams.forEach(team => {
+      report += `*${team.name}*: ${team.players.map(p => `${p.name}`).join(', ')}\n`;
+    });
+
+    report += `\n_Generated by DEEPPITCH_`;
+    return report;
+  };
+
   const shareTournament = async (t) => {
     try {
-      // Fetch HTML content from serverless backend
-      const response = await fetch(SERVERLESS_ENDPOINT, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'GENERATE_PDF_HTML', tournament: t, type: 'FULL_REPORT' }),
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error("Server responded with non-OK status for PDF HTML (share):", response.status, errorText);
-        throw new Error(`Server error: ${response.status} - ${errorText.substring(0, 100)}...`);
-      }
-
-      const data = await response.json();
-
-      if (!data.success || !data.html) {
-        console.error("Server response data for PDF HTML (share) was: ", data);
-        throw new Error(data.error || "Failed to generate HTML report from server.");
-      }
-      const htmlContent = data.html;
-      
-      const { uri: printTempUri } = await Print.printToFileAsync({ html: htmlContent });
-      console.log("PDF generated by Print at URI:", printTempUri);
-
-      let shareUri = printTempUri;
-      if (Platform.OS === 'android') {
-        // For Android, Print.printToFileAsync might return a content:// URI which needs conversion for Sharing.shareAsync
-        const fileName = `DeepPitch_Report_Share_${Date.now()}.pdf`;
-        const newFilePath = `${FileSystem.cacheDirectory}${fileName}`;
-        // Read the content (might be large), then write to a new accessible path
-        const fileContent = await FileSystem.readAsStringAsync(printTempUri, { encoding: FileSystem.EncodingType.Base64 });
-        await FileSystem.writeAsStringAsync(newFilePath, fileContent, { encoding: FileSystem.EncodingType.Base64 });
-        shareUri = newFilePath; // Use the new file path for sharing
-      }
-
-      await Sharing.shareAsync(shareUri, { 
-        mimeType: 'application/pdf',
-        dialogTitle: `Share ${t.name} Report`,
-        UTI: 'com.adobe.pdf' // For iOS to hint PDF type
+      const content = generateMarkdownReport(t);
+      await Share.share({
+        message: content,
+        title: `${t.name} - Full Tournament Details`
       });
     } catch (e) {
-      console.error("PDF Share Error:", e);
-      Alert.alert("PDF Share Error", e.message || "Failed to generate PDF. Check console for details.");
-      Share.share({
-        message: `DeepPitch Tournament: ${t.name}\nTeams: ${t.teams.length}\nType: ${t.type}`,
-      });
+      Alert.alert("Share Error", "Failed to generate shareable text content.");
     }
   };
 
@@ -258,12 +358,7 @@ export default function App() {
     }
 
     // Final shuffle of the entire matches array for randomized display order
-    for (let i = matches.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [matches[i], matches[j]] = [matches[j], matches[i]];
-    }
-
-    return matches;
+    return matches.sort(() => Math.random() - 0.5);
   }
 
   const getTN = (id) => {
@@ -286,6 +381,36 @@ export default function App() {
       return t;
     });
     save(updated);
+  };
+
+  const randomizeFixtures = () => {
+    if (!activeT) return;
+    Alert.alert(
+      "Randomize Fixtures",
+      "This will shuffle all pairings. Are you sure?",
+      [
+        { text: "Cancel", style: "cancel" },
+        { 
+          text: "Randomize", 
+          onPress: async () => {
+            const newMatches = generateMatches(
+              activeT.teams, 
+              activeT.type, 
+              parseInt(activeT.config?.teamsPerGroup || 4), 
+              parseInt(activeT.config?.qualifiersCount || 2)
+            );
+            const updated = tournaments.map(t => {
+              if (t.id === activeID) { return { ...t, matches: newMatches }; }
+              return t;
+            });
+            await save(updated);
+            if (Platform.OS === 'android') {
+              ToastAndroid.show('Fixtures Randomized!', ToastAndroid.SHORT);
+            }
+          }
+        }
+      ]
+    );
   };
 
   const updateMatch = (tId, mId, hS, aS, events = null, statusOverride = null, extraData = {}) => {
@@ -453,6 +578,7 @@ export default function App() {
 
   const exportAsCSV = async () => {
     if (!activeT) return;
+    setLoading(true);
     try {
       const response = await fetch(SERVERLESS_ENDPOINT, {
         method: 'POST',
@@ -460,32 +586,25 @@ export default function App() {
         body: JSON.stringify({ action: 'GENERATE_CSV', tournament: activeT }),
       });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error("Server responded with non-OK status for CSV:", response.status, errorText);
-        throw new Error(`Server error: ${response.status} - ${errorText.substring(0, 100)}...`);
-      }
+      if (!response.ok) throw new Error("Connection to engine failed.");
 
       const data = await response.json();
-
-      if (!data.success || !data.csv) {
-        console.error("Server response data for CSV was: ", data);
-        throw new Error(data.error || "Failed to generate CSV from server.");
-      }
-      const csvContent = data.csv;
+      if (!data.success || !data.csv) throw new Error(data.error || "Failed to generate CSV.");
       
       const fileName = `${activeT.name.replace(/\s+/g, '_')}_fixtures.csv`;
       const fileUri = `${FileSystem.documentDirectory}${fileName}`;
-      await FileSystem.writeAsStringAsync(fileUri, csvContent, { encoding: FileSystem.EncodingType.UTF8 });
+      await FileSystem.writeAsStringAsync(fileUri, data.csv, { encoding: FileSystem.EncodingType.UTF8 });
       await Sharing.shareAsync(fileUri);
     } catch (e) {
-      Alert.alert("Export Error", "Failed to generate CSV from server.");
-      console.error("CSV Export Error:", e);
+      Alert.alert("Export Error", e.message);
+    } finally {
+      setLoading(false);
     }
   };
 
   const exportAsPDF = async (type) => {
     if (!activeT) return;
+    setLoading(true);
     try {
       const response = await fetch(SERVERLESS_ENDPOINT, {
         method: 'POST',
@@ -493,35 +612,21 @@ export default function App() {
         body: JSON.stringify({ action: 'GENERATE_PDF_HTML', tournament: activeT, type: type }),
       });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error("Server responded with non-OK status for PDF HTML:", response.status, errorText);
-        throw new Error(`Server error: ${response.status} - ${errorText.substring(0, 100)}...`);
-      }
-
       const data = await response.json();
-
-      if (!data.success || !data.html) {
-        console.error("Server response data for PDF HTML (share) was: ", data);
-        throw new Error(data.error || "Failed to generate HTML report from server.");
-      }
-      const htmlContent = data.html;
+      if (!data.success) throw new Error("Failed to generate HTML.");
       
-      const { uri: printTempUri } = await Print.printToFileAsync({ html: htmlContent });
+      // Get the base64 string
+      const { base64 } = await Print.printToFileAsync({ 
+        html: data.html, 
+        base64: true 
+      });
+      
+      await saveAndSharePdf(base64, `DeepPitch_${type}`);
 
-      let shareUri = printTempUri;
-      if (Platform.OS === 'android') {
-        const fileName = `DeepPitch_Report_${Date.now()}.pdf`;
-        const newFilePath = `${FileSystem.cacheDirectory}${fileName}`;
-        const fileContent = await FileSystem.readAsStringAsync(printTempUri, { encoding: FileSystem.EncodingType.Base64 });
-        await FileSystem.writeAsStringAsync(newFilePath, fileContent, { encoding: FileSystem.EncodingType.Base64 });
-        shareUri = newFilePath;
-      }
-
-      await Sharing.shareAsync(shareUri, { mimeType: 'application/pdf', dialogTitle: `Share Report`, UTI: 'com.adobe.pdf' });
     } catch (e) {
-      console.error("PDF Export Error:", e);
-      Alert.alert("PDF Export Error", e.message || "Failed to generate PDF. Check console for details.");
+      Alert.alert("PDF Export Error", e.message);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -611,18 +716,36 @@ export default function App() {
 
               {activeTab === 'FIXTURES' && (
                 <>
-                  <View style={{flexDirection: 'row', justifyContent: 'flex-end', gap: 10, marginBottom: 15}}>
-                    <TouchableOpacity onPress={() => exportAsPDF('FIXTURES')} style={styles.miniBtn}>
-                      <Icons.FileText color={COLORS.accent} size={14} />
-                      <Text style={styles.miniBtnText}>PDF</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity onPress={exportAsCSV} style={styles.miniBtn}>
-                      <Icons.Table color={COLORS.primary} size={14} />
-                      <Text style={styles.miniBtnText}>CSV</Text>
-                    </TouchableOpacity>
+                  <View style={{flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 15}}>
+                    {activeT.matches.every(m => !m.done && m.status === 'PENDING') ? (
+                      <TouchableOpacity 
+                        onPress={randomizeFixtures} 
+                        style={[styles.miniBtn, {borderColor: COLORS.gold}]}
+                      >
+                        <Icons.RefreshCw color={COLORS.gold} size={14} />
+                        <Text style={[styles.miniBtnText, {color: COLORS.gold}]}>RANDOMIZE FIXTURES</Text>
+                      </TouchableOpacity>
+                    ) : (
+                      <View />
+                    )}
+                    <View style={{flexDirection: 'row', gap: 10}}>
+                      <TouchableOpacity onPress={() => exportAsPDF('FIXTURES')} style={styles.miniBtn}>
+                        <Icons.FileText color={COLORS.accent} size={14} />
+                        <Text style={styles.miniBtnText}>PDF</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity onPress={exportAsCSV} style={styles.miniBtn}>
+                        <Icons.Table color={COLORS.primary} size={14} />
+                        <Text style={styles.miniBtnText}>CSV</Text>
+                      </TouchableOpacity>
+                    </View>
                   </View>
                   {activeT.matches.map(m => (
-                  <View key={m.id} style={[styles.match, m.away === 'BYE' && {opacity: 0.5}]}>
+                  <TouchableOpacity 
+                    key={m.id} 
+                    disabled={m.away === 'BYE'}
+                    onPress={() => { setSelectedMatch(m); setMatchModal(true); }}
+                    style={[styles.match, m.away === 'BYE' && {opacity: 0.5}]}
+                  >
                     <View style={{flex: 1}}>
                       {m.group && <Text style={styles.mTag}>GROUP {m.group}</Text>}
                       {m.round && <Text style={[styles.mTag, {color: COLORS.gold}]}>ROUND {m.round}</Text>}
@@ -635,20 +758,17 @@ export default function App() {
                             {Math.floor(m.time / 60)}' {m.addedTime ? `+${m.addedTime}` : ''}
                           </Text>
                         )}
-                        <TouchableOpacity 
-                          style={[styles.manageBtn, m.done && {borderColor: COLORS.primary}, m.status === 'LIVE' && {borderColor: COLORS.danger}]} 
-                          onPress={() => { setSelectedMatch(m); setMatchModal(true); }}
-                        >
-                          <Text style={[styles.manageBtnText, m.done && {color: COLORS.primary}, m.status === 'LIVE' && {color: COLORS.danger}]}>
-                            {m.done ? `${m.hScore} - ${m.aScore}` : (m.status === 'LIVE' ? `${m.hScore} - ${m.aScore}` : 'MANAGE')}
+                        <View style={[styles.scoreBadge, m.done && {backgroundColor: COLORS.primary + '20', borderColor: COLORS.primary}, m.status === 'LIVE' && {backgroundColor: COLORS.danger + '20', borderColor: COLORS.danger}]}>
+                          <Text style={[styles.scoreText, m.done && {color: COLORS.primary}, m.status === 'LIVE' && {color: COLORS.danger}]}>
+                            {m.done || m.status === 'LIVE' ? `${m.hScore} - ${m.aScore}` : 'VS'}
                           </Text>
-                        </TouchableOpacity>
+                        </View>
                       </View>
                     ) : (
                       <Text style={{color: COLORS.muted, fontSize: 10, flex: 0.5, textAlign: 'center'}}>BYE</Text>
                     )}
                     <Text style={[styles.mTeam, {textAlign: 'right', flex: 1, color: getTC(m.away)}]}>{getTN(m.away)}</Text>
-                  </View>
+                  </TouchableOpacity>
                 ))}
                 </>
               )}
@@ -1021,6 +1141,13 @@ export default function App() {
         </View>
       </Modal>
 
+      {loading && (
+        <View style={styles.loadingOverlay}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={{color: '#fff', marginTop: 10, fontWeight: 'bold'}}>ENGINE PROCESSING...</Text>
+        </View>
+      )}
+
       </SafeAreaView>
     </SafeAreaProvider>
   );
@@ -1068,8 +1195,8 @@ const styles = StyleSheet.create({
   statRow: { flexDirection: 'row', justifyContent: 'space-between', padding: 12, backgroundColor: COLORS.card, borderRadius: 8, marginBottom: 5 },
   statName: { color: '#fff', fontWeight: '500' },
   statVal: { color: COLORS.primary, fontWeight: 'bold' },
-  manageBtn: { borderWidth: 1, borderColor: COLORS.border, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6, minWidth: 60, alignItems: 'center' },
-  manageBtnText: { color: COLORS.muted, fontSize: 12, fontWeight: 'bold' },
+  scoreBadge: { borderWidth: 1, borderColor: COLORS.border, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6, minWidth: 60, alignItems: 'center', backgroundColor: COLORS.secondary },
+  scoreText: { color: COLORS.muted, fontSize: 13, fontWeight: '900' },
   eventRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.secondary, padding: 8, borderRadius: 6, marginBottom: 5 },
   actionBtn: { width: 24, height: 24, borderRadius: 4, borderWidth: 1, borderColor: COLORS.primary, alignItems: 'center', justifyContent: 'center' },
   bracketNode: { backgroundColor: COLORS.card, borderRadius: 8, borderWidth: 1, borderColor: COLORS.border, marginVertical: 10, overflow: 'hidden' },
@@ -1077,5 +1204,6 @@ const styles = StyleSheet.create({
   bracketTeamText: { color: '#fff', fontSize: 11, fontWeight: '600', flex: 1 },
   bracketScore: { color: COLORS.gold, fontWeight: 'bold', fontSize: 12, marginLeft: 5, width: 20, textAlign: 'right' },
   miniBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.secondary, paddingVertical: 6, paddingHorizontal: 12, borderRadius: 6, gap: 5, borderWidth: 1, borderColor: COLORS.border },
-  miniBtnText: { color: '#fff', fontSize: 10, fontWeight: 'bold' }
+  miniBtnText: { color: '#fff', fontSize: 10, fontWeight: 'bold' },
+  loadingOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.85)', justifyContent: 'center', alignItems: 'center', zIndex: 9999 }
 });
