@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput, 
-  Modal, Alert, StatusBar, Dimensions, Share, Platform, BackHandler, ToastAndroid,
+  Modal, Alert, StatusBar, Dimensions, Share, Platform, BackHandler,
   ActivityIndicator
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
@@ -12,23 +12,31 @@ import * as Sharing from 'expo-sharing';
 import * as FileSystem from 'expo-file-system/legacy';
 import { captureRef } from 'react-native-view-shot';
 
+import { COLORS, escapeHtml, getTN, getTC, getStats, getPlayerStats } from './src/utils/tournamentHelpers';
+
 const { width } = Dimensions.get('window');
 
-const COLORS = {
-  bg: '#050505', card: '#121212', primary: '#00FF66', 
-  secondary: '#1A1A1A', text: '#FFFFFF', muted: '#A0A0A0',
-  border: '#222222', danger: '#FF4444', accent: '#00A3FF',
-  gold: '#FFD700'
-};
-
 // Backend Endpoint Configuration
-// Use your local IP address (e.g., '192.168.1.5') if testing on a physical device.
-// Use '10.0.2.2' for Android Emulator.
-// NOTE: 10.0.2.2 is ONLY for Android Emulators. 
-// If using a physical device, change DEV_URL to your computer's IP (e.g., 'http://192.168.1.5:3000/api')
-const DEV_URL = 'http://192.168.29.203:3000/api'; 
-const PROD_URL = 'https://deeppitch-engine.vercel.app/api';
-const SERVERLESS_ENDPOINT = __DEV__ ? DEV_URL : PROD_URL;
+// Backend Endpoint Configuration
+// Read from environment variables.
+// In development, `process.env.EXPO_PUBLIC_DEV_API_URL` should be your local IP.
+// In production, `process.env.EXPO_PUBLIC_PROD_API_URL` should be your deployed server URL.
+// Ensure these are set in your .env file (e.g., EXPO_PUBLIC_DEV_API_URL=http://192.168.1.5:3000/api)
+const DEV_URL = process.env.EXPO_PUBLIC_DEV_API_URL; 
+const PROD_URL = process.env.EXPO_PUBLIC_PROD_API_URL;
+let SERVERLESS_ENDPOINT = __DEV__ ? DEV_URL : PROD_URL; // Changed const to let
+
+// Validation for local development/misconfiguration
+if (__DEV__ && !DEV_URL) {
+  console.warn("EXPO_PUBLIC_DEV_API_URL is not set in your .env file. Using a placeholder. Please configure your local API URL.");
+  // Fallback to a common local IP for emulator or a generic placeholder
+  // User should still set their specific IP for physical devices.
+  SERVERLESS_ENDPOINT = 'http://10.0.2.2:3000/api'; 
+} else if (!__DEV__ && !PROD_URL) {
+  console.error("EXPO_PUBLIC_PROD_API_URL is not set for production build. API calls may fail.");
+  // Fallback to a known production URL or fail explicitly
+  SERVERLESS_ENDPOINT = 'https://deeppitch-engine.vercel.app/api'; // Fallback to original PROD URL
+}
 
 export default function App() {
   const [screen, setScreen] = useState('HOME'); // HOME, MANAGE
@@ -41,9 +49,29 @@ export default function App() {
   const [teamModal, setTeamModal] = useState(false);
   const [editingTeam, setEditingTeam] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [toastVisible, setToastVisible] = useState(false);
+  const [toastMessage, setToastMessage] = useState('');
+  const toastTimeoutRef = useRef(null);
   const standingsRef = useRef();
   const bracketRef = useRef();
   const backPressCount = useRef(0);
+
+  // AsyncStorage Keys
+  // Moved escapeHtml, getTN, getTC, getStats, getPlayerStats to src/utils/tournamentHelpers.js
+  const STORAGE_KEY_LIST = '@DP_TOURNAMENT_LIST'; // Stores [{id, name, type}, ...]
+  const STORAGE_KEY_TOURNAMENT_PREFIX = '@DP_TOURNAMENT_DATA:'; // Stores full tournament data
+  const STORAGE_KEY_ACTIVE_ID = '@DP_ACTIVE_ID'; // Stores active tournament ID
+
+  const showToast = (message, duration = 2000) => {
+    setToastMessage(message);
+    setToastVisible(true);
+    if (toastTimeoutRef.current) {
+      clearTimeout(toastTimeoutRef.current);
+    }
+    toastTimeoutRef.current = setTimeout(() => {
+      setToastVisible(false);
+    }, duration);
+  };
 
   useEffect(() => {
     const backAction = () => {
@@ -64,9 +92,7 @@ export default function App() {
           BackHandler.exitApp();
         } else {
           backPressCount.current = 1;
-          if (Platform.OS === 'android') {
-            ToastAndroid.show('Press back twice to exit', ToastAndroid.SHORT);
-          }
+          showToast('Press back twice to exit'); // Cross-platform toast
           setTimeout(() => { backPressCount.current = 0; }, 2000);
           return true;
         }
@@ -103,13 +129,59 @@ export default function App() {
     return () => clearInterval(timer);
   }, []);
 
+  // Helper to save just the list of tournament metadata (ID, name, type)
+  const saveTournamentList = async (listMetadata) => {
+    await AsyncStorage.setItem(STORAGE_KEY_LIST, JSON.stringify(listMetadata));
+  };
+
+  // Helper to save a single tournament's full data
+  const saveTournament = async (tournament) => {
+    await AsyncStorage.setItem(STORAGE_KEY_TOURNAMENT_PREFIX + tournament.id, JSON.stringify(tournament));
+  };
+
+  // Helper to delete a single tournament's full data
+  const deleteTournamentData = async (id) => {
+    await AsyncStorage.removeItem(STORAGE_KEY_TOURNAMENT_PREFIX + id);
+  };
+
   const load = async () => {
-    const data = await AsyncStorage.getItem('@DP_DATA');
-    const lastActive = await AsyncStorage.getItem('@DP_ACTIVE_ID');
-    if (data) setTournaments(JSON.parse(data));
-    if (lastActive) {
-      setActiveID(lastActive);
-      setScreen('MANAGE');
+    try {
+      setLoading(true);
+      const listMetadataString = await AsyncStorage.getItem(STORAGE_KEY_LIST);
+      const lastActive = await AsyncStorage.getItem(STORAGE_KEY_ACTIVE_ID);
+      let loadedTournaments = [];
+      
+      if (listMetadataString) {
+        const listMetadata = JSON.parse(listMetadataString);
+        const fetchPromises = listMetadata.map(async (meta) => {
+          try {
+            const tournamentData = await AsyncStorage.getItem(STORAGE_KEY_TOURNAMENT_PREFIX + meta.id);
+            if (tournamentData) {
+              return JSON.parse(tournamentData);
+            }
+          } catch (e) {
+            console.error(`Error loading tournament data for ID ${meta.id}:`, e);
+          }
+          return null;
+        });
+        loadedTournaments = (await Promise.all(fetchPromises)).filter(Boolean);
+        setTournaments(loadedTournaments);
+      }
+
+      if (lastActive) {
+        const foundActive = loadedTournaments.find(t => t.id === lastActive);
+        if (foundActive) {
+          setActiveID(lastActive);
+          setScreen('MANAGE');
+        } else { // Active ID no longer exists, clear it
+          await AsyncStorage.removeItem(STORAGE_KEY_ACTIVE_ID);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to load tournaments from storage", e);
+      Alert.alert("Load Error", "Failed to load tournament data. Some data might be corrupted.");
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -118,8 +190,16 @@ export default function App() {
       { text: "Cancel" },
       { text: "Delete", onPress: async () => {
         const filtered = tournaments.filter(t => t.id !== id);
-        await save(filtered);
-        await AsyncStorage.removeItem('@DP_ACTIVE_ID');
+        
+        // Update local state
+        setTournaments(filtered); 
+
+        // Delete individual tournament data and update the list metadata
+        await deleteTournamentData(id);
+        await saveTournamentList(filtered.map(t => ({ id: t.id, name: t.name, type: t.type })));
+
+        // Clear active tournament if it was the one deleted
+        await AsyncStorage.removeItem(STORAGE_KEY_ACTIVE_ID);
         setActiveID(null);
         setScreen('HOME');
       }}
@@ -129,24 +209,16 @@ export default function App() {
   const selectTournament = async (id) => {
     setActiveID(id);
     setScreen('MANAGE');
-    await AsyncStorage.setItem('@DP_ACTIVE_ID', id);
+    await AsyncStorage.setItem(STORAGE_KEY_ACTIVE_ID, id);
   };
 
   const goHome = async () => {
     setScreen('HOME');
     setActiveID(null);
-    await AsyncStorage.removeItem('@DP_ACTIVE_ID');
+    await AsyncStorage.removeItem(STORAGE_KEY_ACTIVE_ID);
   };
 
-  const escapeHtml = (unsafe) => {
-    if (!unsafe || typeof unsafe !== 'string') return unsafe;
-    return unsafe
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#039;");
-  };
+
 
   // --- THE FINAL PERMANENT FIX ---
   const saveAndSharePdf = async (base64Data, baseName) => {
@@ -190,14 +262,14 @@ export default function App() {
         report += `Team | P | GD | PTS\n`;
         const groupStats = getStats({...t, matches: t.matches.filter(m => m.group === g)});
         groupStats.forEach(([id, s]) => {
-          report += `${getTN(id)} | ${s.p} | ${s.gd} | ${s.pts}\n`;
+          report += `${getTN(id, t)} | ${s.p} | ${s.gd} | ${s.pts}\n`;
         });
       });
     } else {
       report += `Pos | Team | P | GD | PTS\n`;
       const stats = getStats(t);
       stats.forEach(([id, s], i) => {
-        report += `${i + 1}. ${getTN(id)} | ${s.p} | ${s.gd} | ${s.pts}\n`;
+        report += `${i + 1}. ${getTN(id, t)} | ${s.p} | ${s.gd} | ${s.pts}\n`;
       });
     }
     report += `\n`;
@@ -227,10 +299,10 @@ export default function App() {
       if (m.away === 'BYE') return;
       const matchType = m.round ? `Round ${m.round}` : (m.group ? `Group ${m.group}` : "Match");
       const score = m.done ? `${m.hScore} - ${m.aScore}` : (m.status === 'LIVE' ? "LIVE" : "VS");
-      report += `[${matchType}] ${getTN(m.home)} ${score} ${getTN(m.away)}\n`;
+      report += `[${matchType}] ${getTN(m.home, t)} ${score} ${getTN(m.away, t)}\n`;
       if (m.events && m.events.length > 0) {
         m.events.forEach(e => {
-          report += `  - ${e.type}: ${e.player} (${getTN(e.teamId)})\n`;
+          report += `  - ${e.type}: ${e.player} (${getTN(e.teamId, t)})\n`;
         });
       }
     });
@@ -258,18 +330,55 @@ export default function App() {
     }
   };
 
-  const save = async (list) => {
-    setTournaments(list);
-    await AsyncStorage.setItem('@DP_DATA', JSON.stringify(list));
+  // This `save` function now takes the *entire* updated list of tournaments
+  // and intelligently saves metadata and individual tournament data.
+  const save = async (updatedTournamentsList) => {
+    setTournaments(updatedTournamentsList); // Update local state immediately
+
+    // Prepare metadata list (only id, name, type for display)
+    const listMetadata = updatedTournamentsList.map(t => ({ id: t.id, name: t.name, type: t.type }));
+    await saveTournamentList(listMetadata);
+
+    // Save each tournament's full data individually
+    for (const tourney of updatedTournamentsList) {
+      await saveTournament(tourney);
+    }
   };
 
-  const createTournament = () => {
+  const createTournament = async () => { // Make function async
     const teamNames = teamsRaw.split(',').map(t => t.trim()).filter(t => t);
     
     // Validation
     if (!name) return Alert.alert("Error", "Tournament name required");
-    if (type === 'GROUPS' && teamNames.length < 4) return Alert.alert("Error", "Minimum 4 teams for Group format");
-    if (type !== 'GROUPS' && teamNames.length < 2) return Alert.alert("Error", "Minimum 2 teams required");
+    if (teamNames.length === 0) return Alert.alert("Error", "Please enter at least one team name.");
+
+    // Check for duplicate team names
+    const uniqueTeamNames = new Set(teamNames);
+    if (uniqueTeamNames.size !== teamNames.length) {
+      return Alert.alert("Error", "All team names must be unique. Please remove duplicate names.");
+    }
+
+    if (type === 'GROUPS') {
+      if (teamNames.length < 4) return Alert.alert("Error", "Minimum 4 teams required for Group format.");
+
+      const parsedTeamsPerGroup = parseInt(teamsPerGroup, 10);
+      const parsedQualifiersCount = parseInt(qualifiersCount, 10);
+
+      if (isNaN(parsedTeamsPerGroup) || parsedTeamsPerGroup < 2) {
+        return Alert.alert("Error", "Teams per group must be a number of 2 or more.");
+      }
+      if (isNaN(parsedQualifiersCount) || parsedQualifiersCount < 1) {
+        return Alert.alert("Error", "Qualifiers count must be a number of 1 or more.");
+      }
+      if (parsedQualifiersCount >= parsedTeamsPerGroup) {
+        return Alert.alert("Error", "Qualifiers count must be less than the number of teams per group.");
+      }
+      if (teamNames.length < parsedTeamsPerGroup) {
+        return Alert.alert("Error", `Total number of teams (${teamNames.length}) cannot be less than teams per group (${parsedTeamsPerGroup}).`);
+      }
+    } else { // LEAGUE or KNOCKOUT
+      if (teamNames.length < 2) return Alert.alert("Error", "Minimum 2 teams required for this format.");
+    }
 
     const teams = teamNames.map(n => ({
       id: Math.random().toString(36).substr(2, 5),
@@ -291,8 +400,11 @@ export default function App() {
       status: 'ACTIVE'
     };
 
-    const updated = [...tournaments, newTourney];
-    save(updated);
+    const updatedTournaments = [...tournaments, newTourney];
+    
+    // Update local state and persist to AsyncStorage
+    await save(updatedTournaments); // Uses the updated save function
+
     setModal(false);
     setName(''); setTeamsRaw(''); setTemplate('CUSTOM');
     setType('LEAGUE'); // Reset type to default
@@ -303,8 +415,10 @@ export default function App() {
     selectTournament(newTourney.id);
   };
 
-  function generateMatches(teams, mode, groupSize = 4, quals = 2, isHomeAway = false) { // Added isHomeAway parameter
-    const generateId = () => Math.random().toString(36).substr(2, 9);
+  const generateId = () => Math.random().toString(36).substr(2, 9);
+
+  // Helper function to generate matches based on tournament type
+  function generateMatches(teams, mode, groupSize = 4, quals = 2, isHomeAway = false) {
     let matches = [];
 
     // Fisher-Yates Shuffle for better randomization of team pairings initially
@@ -451,19 +565,6 @@ export default function App() {
     return matches;
   }
 
-  const getTN = (id) => {
-    if (id === 'BYE') return 'BYE';
-    if (id === '?') return '?';
-    const t = activeT?.teams.find(t => t.id === id);
-    // Ensure the returned value is explicitly a string for rendering robustness
-    return String(t ? t.name : id);
-  };
-
-  const getTC = (id) => {
-    const t = activeT?.teams.find(t => t.id === id);
-    return t ? t.color : COLORS.primary;
-  };
-
   const updateTeam = (team) => {
     const updated = tournaments.map(t => {
       if (t.id === activeID) {
@@ -534,43 +635,15 @@ export default function App() {
           return m;
         });
 
-        // Auto-advance Knockouts
-        if (t.type === 'KNOCKOUT' || (t.type === 'GROUPS' && newMatches.some(m => m.round))) {
-          const currentMatch = newMatches.find(m => m.id === mId);
-          if (currentMatch && currentMatch.done && currentMatch.winner && currentMatch.winner !== 'DRAW') {
-            const roundMatches = newMatches.filter(m => m.round === currentMatch.round);
-            const matchInRoundIndex = currentMatch.roundIdx;
-            const nextRound = (currentMatch.round || 0) + 1;
-            const nextMatchInRoundIndex = Math.floor(matchInRoundIndex / 2);
-            let nextMatch = newMatches.find(m => m.round === nextRound && m.roundIdx === nextMatchInRoundIndex);
-            
-            if (!nextMatch && roundMatches.length > 1) { // Only create new round if not final
-              nextMatch = { id: Math.random().toString(36).substr(2, 9), round: nextRound, roundIdx: nextMatchInRoundIndex, home: '?', away: '?', hScore: '', aScore: '', done: false, events: [], status: 'PENDING', time: 0 };
-              newMatches.push(nextMatch);
-            }
-            if (nextMatch) {
-              if (matchInRoundIndex % 2 === 0) nextMatch.home = currentMatch.winner;
-              else nextMatch.away = currentMatch.winner;
-            }
-          }
-        }
+        // After updating a match, apply any necessary tournament logic
+        // Extracting this logic into separate helper functions for clarity.
         
-        // Transition Group to Knockout
-        if (t.type === 'GROUPS' && !newMatches.some(m => m.round)) {
-          const allGroupMatchesDone = newMatches.filter(m => m.group).every(m => m.done);
-          if (allGroupMatchesDone) {
-            const qualifiedIds = [];
-            const groups = [...new Set(newMatches.filter(m => m.group).map(m => m.group))];
-            groups.forEach(g => {
-              const groupStats = getStats({...t, matches: newMatches.filter(m => m.group === g)});
-              qualifiedIds.push(...groupStats.slice(0, t.config.qualifiersCount).map(s => s[0]));
-            });
-            // Pass full team objects for qualified IDs to generateMatches
-            const qualifiedFullTeams = t.teams.filter(team => qualifiedIds.includes(team.id));
-            const knockoutMatches = generateMatches(qualifiedFullTeams, 'KNOCKOUT');
-            newMatches.push(...knockoutMatches.map(m => ({...m, round: 1})));
-          }
-        }
+        // Handle knockout advancement if applicable
+        newMatches = advanceKnockoutRound(newMatches, updatedMatchObj);
+
+        // Handle transition from group stage to knockout stage if all group matches are done
+        newMatches = transitionGroupToKnockout(newMatches, t.type, t.config, t.teams, t.settings);
+        
         return { ...t, matches: newMatches };
       }
       return t;
@@ -579,90 +652,75 @@ export default function App() {
     save(updated);
   };
 
-  const getStats = (t) => {
-    if (!t || !t.teams || !t.matches) return []; // Ensure matches exist
-    let stats = {};
-    
-    // Collect all unique team IDs that actually appear in the provided matches
-    const uniqueTeamIdsInMatches = new Set();
-    t.matches.forEach(m => {
-        if (m.home !== 'BYE') uniqueTeamIdsInMatches.add(m.home);
-        if (m.away !== 'BYE') uniqueTeamIdsInMatches.add(m.away);
-    });
 
-    // Initialize stats only for teams relevant to the current set of matches
-    t.teams.forEach(tm => {
-        if (uniqueTeamIdsInMatches.has(tm.id)) {
-            stats[tm.id] = { id: tm.id, p: 0, w: 0, d: 0, l: 0, pts: 0, gd: 0, gs: 0, fp: 0 };
-        }
-    });
-    
-    t.matches.forEach(m => {
-      // Only process matches where both home and away teams exist in our stats object
-      if (m.done && m.away !== 'BYE' && stats[m.home] && stats[m.away]) {
-        const hs = parseInt(m.hScore) || 0, as = parseInt(m.aScore) || 0;
-        const h = stats[m.home], a = stats[m.away];
-        h.p++; a.p++; 
-        h.gs += hs; a.gs += as;
-        h.gd += (hs - as); a.gd += (as - hs);
-        
-        (m.events || []).forEach(e => {
-          if (e.type === 'YELLOW') { if (e.teamId === m.home) h.fp -= 1; else a.fp -= 1; }
-          if (e.type === 'RED') { if (e.teamId === m.home) h.fp -= 3; else a.fp -= 3; } // Corrected red card penalty for away team
-        });
-
-        if (hs > as) { h.w++; a.l++; h.pts += t.settings.ptsWin; }
-        else if (as > hs) { a.w++; h.l++; a.pts += t.settings.ptsWin; }
-        else { h.d++; a.d++; h.pts += t.settings.ptsDraw; a.pts += t.settings.ptsDraw; }
-      }
-    });
-
-    const tb = t.settings.tieBreakers || ['GD', 'H2H', 'GS', 'FP'];
-
-    return Object.entries(stats).sort((a_entry, b_entry) => {
-      const a = a_entry[1], b = b_entry[1];
-      if (b.pts !== a.pts) return b.pts - a.pts;
+  // Helper function to advance teams in knockout rounds
+  const advanceKnockoutRound = (matches, currentMatch) => {
+    let updatedMatches = [...matches];
+    // Only process if it's a knockout-style match (has a round number) and is done with a clear winner
+    if (currentMatch && currentMatch.round && currentMatch.done && currentMatch.winner && currentMatch.winner !== 'DRAW') {
+      const roundMatches = updatedMatches.filter(m => m.round === currentMatch.round);
+      const matchInRoundIndex = currentMatch.roundIdx;
+      const nextRound = (currentMatch.round || 0) + 1;
+      const nextMatchInRoundIndex = Math.floor(matchInRoundIndex / 2);
       
-      for (let rule of tb) {
-        if (rule === 'GD' && b.gd !== a.gd) return b.gd - a.gd;
-        if (rule === 'GS' && b.gs !== a.gs) return b.gs - a.gs;
-        if (rule === 'FP' && b.fp !== a.fp) return b.fp - a.fp;
-        if (rule === 'H2H') {
-          const h2h = t.matches.filter(m => m.done && ((m.home === a.id && m.away === b.id) || (m.home === b.id && m.away === a.id)));
-          let aH = 0, bH = 0;
-          h2h.forEach(m => {
-            const hs = parseInt(m.hScore), as = parseInt(m.aScore);
-            if (m.home === a.id) { if (hs > as) aH += 3; else if (as > hs) bH += 3; else { aH++; bH++; } }
-            else { if (as > hs) aH += 3; else if (hs > as) bH += 3; else { aH++; bH++; } }
-          });
-          if (bH !== aH) return bH - aH;
-        }
+      let nextMatch = updatedMatches.find(m => m.round === nextRound && m.roundIdx === nextMatchInRoundIndex);
+      
+      // If the next match doesn't exist AND it's not the final match of the current round (i.e., we need to create a new match in the next round)
+      if (!nextMatch && roundMatches.length > 1) { 
+        nextMatch = { 
+          id: generateId(), 
+          round: nextRound, 
+          roundIdx: nextMatchInRoundIndex, 
+          home: '?', 
+          away: '?', 
+          hScore: '', 
+          aScore: '', 
+          done: false, 
+          events: [], 
+          status: 'PENDING', 
+          time: 0 
+        };
+        updatedMatches.push(nextMatch);
       }
-      return 0;
-    });
+      
+      // If a next match (either existing or newly created) is found, assign the winner
+      if (nextMatch) {
+        if (matchInRoundIndex % 2 === 0) nextMatch.home = currentMatch.winner;
+        else nextMatch.away = currentMatch.winner;
+      }
+    }
+    return updatedMatches;
   };
 
-  const getPlayerStats = (t) => {
-    if (!t || !t.matches) return { scorers: [], assisters: [], cards: [] };
-    const scorers = {};
-    const assisters = {};
-    const cards = {};
-    t.matches.forEach(m => {
-      (m.events || []).forEach(e => {
-        if (e.type === 'GOAL') {
-          scorers[e.player] = (scorers[e.player] || 0) + 1;
-        } else if (e.type === 'ASSIST') {
-          assisters[e.player] = (assisters[e.player] || 0) + 1;
-        } else if (e.type === 'YELLOW' || e.type === 'RED') {
-          cards[e.player] = (cards[e.player] || 0) + 1;
-        }
-      });
-    });
-    return {
-      scorers: Object.entries(scorers).sort((a, b) => b[1] - a[1]),
-      assisters: Object.entries(assisters).sort((a, b) => b[1] - a[1]),
-      cards: Object.entries(cards).sort((a, b) => b[1] - a[1])
-    };
+  // Helper function to transition from group stage to knockout stage
+  const transitionGroupToKnockout = (matches, tournamentType, tournamentConfig, allTeams, tournamentSettings) => {
+    let updatedMatches = [...matches];
+    // Only process if it's a group tournament and no knockout rounds have been generated yet
+    if (tournamentType === 'GROUPS' && !updatedMatches.some(m => m.round)) {
+      const allGroupMatchesDone = updatedMatches.filter(m => m.group).every(m => m.done);
+      if (allGroupMatchesDone) {
+        const qualifiedIds = [];
+        const groups = [...new Set(updatedMatches.filter(m => m.group).map(m => m.group))];
+        groups.forEach(g => {
+          // Temporarily create a tournament-like object for getStats to work on the group
+          const groupSpecificTournament = { 
+            teams: allTeams, 
+            matches: updatedMatches.filter(m => m.group === g), 
+            settings: tournamentSettings 
+          };
+          const groupStats = getStats(groupSpecificTournament);
+          qualifiedIds.push(...groupStats.slice(0, tournamentConfig.qualifiersCount).map(s => s[0]));
+        });
+        
+        // Get full team objects for qualified IDs to generateMatches
+        const qualifiedFullTeams = allTeams.filter(team => qualifiedIds.includes(team.id));
+        const knockoutMatches = generateMatches(qualifiedFullTeams, 'KNOCKOUT');
+        
+        // Add generated knockout matches, ensuring they start from round 1
+        updatedMatches.push(...knockoutMatches.map(m => ({...m, round: 1})));
+      }
+    }
+    return updatedMatches;
   };
 
   const activeT = tournaments.find(t => t.id === activeID) || null;
@@ -686,9 +744,18 @@ export default function App() {
     if (!activeT) return;
     setLoading(true);
     try {
+      // Retrieve API Key from environment variables
+      const SERVERLESS_API_KEY = process.env.EXPO_PUBLIC_SERVERLESS_API_KEY;
+      if (!SERVERLESS_API_KEY) {
+        throw new Error("API key not configured for serverless endpoint.");
+      }
+
       const response = await fetch(SERVERLESS_ENDPOINT, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${SERVERLESS_API_KEY}` // Add Authorization header
+        },
         body: JSON.stringify({ action: 'GENERATE_CSV', tournament: activeT }),
       });
 
@@ -712,9 +779,18 @@ export default function App() {
     if (!activeT) return;
     setLoading(true);
     try {
+      // Retrieve API Key from environment variables
+      const SERVERLESS_API_KEY = process.env.EXPO_PUBLIC_SERVERLESS_API_KEY;
+      if (!SERVERLESS_API_KEY) {
+        throw new Error("API key not configured for serverless endpoint.");
+      }
+      
       const response = await fetch(SERVERLESS_ENDPOINT, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${SERVERLESS_API_KEY}` // Add Authorization header
+        },
         body: JSON.stringify({ action: 'GENERATE_PDF_HTML', tournament: activeT, type: type }),
       });
 
@@ -793,7 +869,7 @@ export default function App() {
             {/* Tournaments List */}
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 25, marginBottom: 15 }}>
               <Text style={[styles.sectionLabel, { marginBottom: 0 }]}>Recent Tournaments</Text>
-              {tournaments.length > 0 && <Text style={{ color: COLORS.muted, fontSize: 10 }}>{tournaments.length} TOTAL</Text>}
+              {tournaments.length > 0 && <Text style={{ color: COLORS.text, fontSize: 10 }}>{tournaments.length} TOTAL</Text>}
             </View>
 
             {tournaments.length === 0 ? (
@@ -863,11 +939,11 @@ export default function App() {
                     [...new Set(activeT.matches.filter(m => m.group).map(m => m.group))].map(g => (
                       <View key={g} style={{marginBottom: 20}}>
                         <Text style={styles.label}>Group {g}</Text>
-                        <StandingsTable data={getStats({...activeT, matches: activeT.matches.filter(m => m.group === g)})} resolveName={getTN} />
+                        <StandingsTable data={getStats({...activeT, matches: activeT.matches.filter(m => m.group === g)})} resolveName={(id) => getTN(id, activeT)} />
                       </View>
                     ))
                   ) : (
-                    <StandingsTable data={getStats(activeT)} resolveName={getTN} />
+                    <StandingsTable data={getStats(activeT)} resolveName={(id) => getTN(id, activeT)} />
                   )}
                 </View>
               )}
@@ -907,7 +983,7 @@ export default function App() {
                     <View style={{flex: 1}}>
                       {m.group && <Text style={styles.mTag}>GROUP {m.group}</Text>}
                       {m.round && <Text style={[styles.mTag, {color: COLORS.gold}]}>ROUND {m.round}</Text>}
-                      <Text style={[styles.mTeam, {color: getTC(m.home)}]}>{getTN(m.home)}</Text>
+                      <Text style={[styles.mTeam, {color: getTC(m.home, activeT)}]}>{getTN(m.home, activeT)}</Text>
                     </View>
                     {m.away !== 'BYE' ? (
                       <View style={{alignItems: 'center', minWidth: 80}}>
@@ -925,7 +1001,7 @@ export default function App() {
                     ) : (
                       <Text style={{color: COLORS.muted, fontSize: 10, flex: 0.5, textAlign: 'center'}}>BYE</Text>
                     )}
-                    <Text style={[styles.mTeam, {textAlign: 'right', flex: 1, color: getTC(m.away)}]}>{getTN(m.away)}</Text>
+                    <Text style={[styles.mTeam, {textAlign: 'right', flex: 1, color: getTC(m.away, activeT)}]}>{getTN(m.away, activeT)}</Text>
                   </TouchableOpacity>
                 ))}
                 </>
@@ -1018,11 +1094,11 @@ export default function App() {
                                 onPress={() => { setSelectedMatch(m); setMatchModal(true); }}
                               >
                                 <View style={styles.bracketTeam}>
-                                  <Text numberOfLines={1} style={[styles.bracketTeamText, m.winner === m.home && { color: COLORS.primary }]}>{getTN(m.home)}</Text>
+                                  <Text numberOfLines={1} style={[styles.bracketTeamText, m.winner === m.home && { color: COLORS.primary }]}>{getTN(m.home, activeT)}</Text>
                                   <Text style={styles.bracketScore}>{m.hScore}</Text>
                                 </View>
                                 <View style={[styles.bracketTeam, { borderTopWidth: 1, borderColor: COLORS.border }]}>
-                                  <Text numberOfLines={1} style={[styles.bracketTeamText, m.winner === m.away && { color: COLORS.primary }]}>{getTN(m.away)}</Text>
+                                  <Text numberOfLines={1} style={[styles.bracketTeamText, m.winner === m.away && { color: COLORS.primary }]}>{getTN(m.away, activeT)}</Text>
                                   <Text style={styles.bracketScore}>{m.aScore}</Text>
                                 </View>
                               </TouchableOpacity>
@@ -1147,7 +1223,7 @@ export default function App() {
             )}
             <View style={{flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5}}>
               <Text style={[styles.label, {fontSize: 10, marginBottom: 0}]}>Teams (comma separated)</Text>
-              {template !== 'CUSTOM' && <Text style={{color: COLORS.muted, fontSize: 10}}>Required: {
+              {template !== 'CUSTOM' && <Text style={{color: COLORS.text, fontSize: 10}}>Required: {
                 template === 'WC' || template === 'UCL' ? '32' : (template === 'EURO' ? '24' : (template === 'KO16' ? '16' : (template === 'L10' ? '10' : '')))
               } teams</Text>}
             </View>
@@ -1246,11 +1322,11 @@ export default function App() {
             {selectedMatch && activeT && (
               <>
                 <View style={{flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10}}>
-                  <Text style={[styles.modalTitle, {marginBottom: 0}]}>{getTN(selectedMatch.home)} vs {getTN(selectedMatch.away)}</Text>
+                  <Text style={[styles.modalTitle, {marginBottom: 0}]}>{getTN(selectedMatch.home, activeT)} vs {getTN(selectedMatch.away, activeT)}</Text>
                   {selectedMatch.status !== 'DONE' && (
                     <View style={{alignItems: 'flex-end'}}>
                       <Text style={{color: COLORS.primary, fontWeight: 'bold'}}>{Math.floor((selectedMatch.time || 0) / 60)}:{(selectedMatch.time || 0) % 60 < 10 ? '0' : ''}{(selectedMatch.time || 0) % 60}</Text>
-                      <Text style={{color: COLORS.muted, fontSize: 9}}>{selectedMatch.status}</Text>
+                      <Text style={{color: COLORS.text, fontSize: 9}}>{selectedMatch.status}</Text>
                     </View>
                   )}
                 </View>
@@ -1290,7 +1366,7 @@ export default function App() {
                   <Text style={styles.label}>Match Events</Text>
                   {(selectedMatch.events || []).map((ev, i) => (
                     <View key={i} style={styles.eventRow}>
-                      <Text style={{color: '#fff', fontSize: 12, flex: 1}}>{ev.type} - {ev.player} ({getTN(ev.teamId)})</Text>
+                      <Text style={{color: '#fff', fontSize: 12, flex: 1}}>{ev.type} - {ev.player} ({getTN(ev.teamId, activeT)})</Text>
                       <TouchableOpacity onPress={() => {
                         const newEvents = selectedMatch.events.filter((_, idx) => idx !== i);
                         updateMatch(activeT.id, selectedMatch.id, '', '', newEvents);
@@ -1303,7 +1379,7 @@ export default function App() {
                   <View style={{marginTop: 20, gap: 10}}>
                     {[selectedMatch.home, selectedMatch.away].map(teamId => (
                       <View key={teamId}>
-                        <Text style={{color: COLORS.muted, fontSize: 10, fontWeight: 'bold'}}>{getTN(teamId)?.toUpperCase()} ACTIONS</Text>
+                        <Text style={{color: COLORS.text, fontSize: 10, fontWeight: 'bold'}}>{getTN(teamId, activeT)?.toUpperCase()} ACTIONS</Text>
                         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{flexDirection: 'row', marginTop: 5}}>
                           {activeT.teams.find(t => t.id === teamId)?.players.map(p => (
                             <View key={p.id} style={{marginRight: 10, gap: 5}}>
@@ -1359,6 +1435,12 @@ export default function App() {
         </View>
       )}
 
+      {toastVisible && (
+        <View style={styles.customToast}>
+          <Text style={styles.customToastText}>{toastMessage}</Text>
+        </View>
+      )}
+
       </SafeAreaView>
     </SafeAreaProvider>
   );
@@ -1368,8 +1450,8 @@ const StandingsTable = ({ data, resolveName }) => (
   <View style={styles.table}>
     <View style={styles.row}><Text style={[styles.cell, {flex: 2, textAlign: 'left'}]}>TEAM</Text><Text style={styles.cell}>P</Text><Text style={styles.cell}>GD</Text><Text style={styles.cell}>PTS</Text></View>
     {data.map(([id, s], i) => (
-      <View key={i} style={[styles.row, {borderTopWidth: 1, borderColor: '#222'}]}>
-        <Text style={[styles.cell, {flex: 2, textAlign: 'left', color: i < 2 ? COLORS.primary : '#fff'}]}>{resolveName ? resolveName(id) : id}</Text>
+      <View key={i} style={[styles.row, {borderTopWidth: 1, borderColor: COLORS.border}]}>
+        <Text style={[styles.cell, {flex: 2, textAlign: 'left', color: i < 2 ? COLORS.primary : COLORS.text}]}>{resolveName ? resolveName(id) : id}</Text>
         <Text style={styles.cell}>{s.p}</Text><Text style={styles.cell}>{s.gd}</Text><Text style={styles.cell}>{s.pts}</Text>
       </View>
     ))}
@@ -1451,5 +1533,20 @@ const styles = StyleSheet.create({
     justifyContent: 'center', 
     alignItems: 'center', 
     zIndex: 9999 
-  }
+  },
+  customToast: {
+    position: 'absolute',
+    bottom: 50,
+    alignSelf: 'center',
+    backgroundColor: 'rgba(0,0,0,0.8)',
+    paddingHorizontal: 15,
+    paddingVertical: 10,
+    borderRadius: 20,
+    zIndex: 10000,
+  },
+  customToastText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '500',
+  },
 });

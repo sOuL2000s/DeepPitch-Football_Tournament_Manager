@@ -1,147 +1,134 @@
 // DeepPitch Serverless Engine
 // This file handles actions related to tournament data, including generating reports.
 
-// Define COLORS for consistent styling in HTML reports
-const COLORS = {
-  bg: '#050505', card: '#121212', primary: '#00FF66',
-  secondary: '#1A1A1A', text: '#FFFFFF', muted: '#A0A0A0',
-  border: '#222222', danger: '#FF4444', accent: '#00A3FF',
-  gold: '#FFD700'
+const { COLORS, escapeHtml, getTN, getTC, getStats, getPlayerStats } = require('../../src/utils/tournamentHelpers');
+
+// Helper to sanitize string inputs using the shared escapeHtml function
+const sanitizeString = (str) => {
+  if (typeof str !== 'string') return '';
+  return escapeHtml(str.trim());
 };
 
-// Helper function to escape HTML special characters
-const escapeHtml = (unsafe) => {
-  if (!unsafe || typeof unsafe !== 'string') return unsafe;
-  return unsafe
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-};
-
-// Helper to get Team Name from ID within a given tournament object
-const getTNServer = (id, tournament) => {
-  if (id === 'BYE') return 'BYE';
-  if (id === '?') return '?';
-  const t = tournament?.teams.find(team => team.id === id);
-  return t ? t.name : id;
-};
-
-// Helper to get Team Color from ID within a given tournament object
-const getTCServer = (id, tournament) => {
-  const t = tournament?.teams.find(team => team.id === id);
-  return t ? t.color : COLORS.primary;
-};
-
-// Helper to calculate Standings for a given tournament object
-const getStatsServer = (tournament) => {
-  if (!tournament || !tournament.teams) {
-    console.warn("getStatsServer: Tournament or teams data missing.");
-    return [];
+// Comprehensive validation and sanitization for the tournament object
+const validateAndSanitizeTournament = (tournament) => {
+  if (!tournament || typeof tournament !== 'object') {
+    throw new Error("Invalid tournament data: expected an object.");
   }
-  let stats = {};
-  tournament.teams.forEach(tm => stats[tm.id] = { id: tm.id, p: 0, w: 0, d: 0, l: 0, pts: 0, gd: 0, gs: 0, fp: 0 });
 
-  tournament.matches.forEach(m => {
-    if (m.done && m.away !== 'BYE' && stats[m.home] && stats[m.away]) {
-      const hs = parseInt(m.hScore) || 0, as = parseInt(m.aScore) || 0;
-      const h = stats[m.home], a = stats[m.away];
-      h.p++; a.p++;
-      h.gs += hs; a.gs += as;
-      h.gd += (hs - as); a.gd += (as - hs);
+  // Sanitize top-level properties
+  tournament.name = sanitizeString(tournament.name);
+  if (!tournament.name) throw new Error("Tournament name is required.");
 
-      (m.events || []).forEach(e => {
-        if (e.type === 'YELLOW') { if (e.teamId === m.home) h.fp -= 1; else a.fp -= 1; }
-        if (e.type === 'RED') { if (e.teamId === m.home) h.fp -= 3; else a.fp -= 3; }
-      });
-
-      if (hs > as) { h.w++; a.l++; h.pts += tournament.settings.ptsWin; }
-      else if (as > hs) { a.w++; h.l++; a.pts += tournament.settings.ptsWin; }
-      else { h.d++; a.d++; h.pts += tournament.settings.ptsDraw; a.pts += tournament.settings.ptsDraw; }
-    }
-  });
-
-  const tb = tournament.settings.tieBreakers || ['GD', 'H2H', 'GS', 'FP'];
-
-  return Object.entries(stats).sort((a_entry, b_entry) => {
-    const a = a_entry[1], b = b_entry[1];
-    if (b.pts !== a.pts) return b.pts - a.pts;
-
-    for (let rule of tb) {
-      if (rule === 'GD' && b.gd !== a.gd) return b.gd - a.gd;
-      if (rule === 'GS' && b.gs !== a.gs) return b.gs - a.gs;
-      if (rule === 'FP' && b.fp !== a.fp) return b.fp - a.fp;
-      if (rule === 'H2H') {
-        const h2h = tournament.matches.filter(m => m.done && ((m.home === a.id && m.away === b.id) || (m.home === b.id && m.away === a.id)));
-        let aH = 0, bH = 0;
-        h2h.forEach(m => {
-          const hs = parseInt(m.hScore), as = parseInt(m.aScore);
-          if (m.home === a.id) { if (hs > as) aH += 3; else if (as > hs) bH += 3; else { aH++; bH++; } }
-          else { if (as > hs) aH += 3; else if (hs > as) bH += 3; else { aH++; bH++; } }
-        });
-        if (bH !== aH) return bH - aH;
-      }
-    }
-    return 0;
-  });
-};
-
-// Helper to calculate Player Stats for a given tournament object
-const getPlayerStatsServer = (tournament) => {
-  if (!tournament || !tournament.matches) {
-    console.warn("getPlayerStatsServer: Tournament or matches data missing.");
-    return { scorers: [], assisters: [], cards: [] };
+  tournament.type = sanitizeString(tournament.type);
+  const allowedTypes = ['LEAGUE', 'KNOCKOUT', 'GROUPS'];
+  if (!allowedTypes.includes(tournament.type)) {
+    throw new Error(`Invalid tournament type: "${tournament.type}". Allowed types are: ${allowedTypes.join(', ')}.`);
   }
-  const scorers = {};
-  const assisters = {};
-  const cards = {};
-  tournament.matches.forEach(m => {
-    (m.events || []).forEach(e => {
-      if (e.type === 'GOAL') {
-        scorers[e.player] = (scorers[e.player] || 0) + 1;
-      } else if (e.type === 'ASSIST') {
-        assisters[e.player] = (assisters[e.player] || 0) + 1;
-      } else if (e.type === 'YELLOW' || e.type === 'RED') {
-        cards[e.player] = (cards[e.player] || 0) + 1;
-      }
+
+  // Validate teams
+  if (!Array.isArray(tournament.teams)) throw new Error("Invalid tournament data: teams must be an array.");
+  tournament.teams = tournament.teams.map(team => {
+    if (!team || typeof team !== 'object') throw new Error("Invalid team data: expected an object.");
+    team.id = sanitizeString(team.id); 
+    team.name = sanitizeString(team.name);
+    if (!team.name) throw new Error("Team name is required for a team.");
+    team.color = sanitizeString(team.color);
+
+    if (!Array.isArray(team.players)) team.players = []; 
+    team.players = team.players.map(player => {
+      if (!player || typeof player !== 'object') throw new Error("Invalid player data: expected an object.");
+      player.id = sanitizeString(player.id);
+      player.name = sanitizeString(player.name);
+      player.number = sanitizeString(player.number); // Player numbers can be string (e.g., '00', 'GK')
+      return player;
     });
+    return team;
   });
-  return {
-    scorers: Object.entries(scorers).sort((a, b) => b[1] - a[1]),
-    assisters: Object.entries(assisters).sort((a, b) => b[1] - a[1]),
-    cards: Object.entries(cards).sort((a, b) => b[1] - a[1])
-  };
+
+  // Validate matches
+  if (!Array.isArray(tournament.matches)) throw new Error("Invalid tournament data: matches must be an array.");
+  tournament.matches = tournament.matches.map(match => {
+    if (!match || typeof match !== 'object') throw new Error("Invalid match data: expected an object.");
+    match.id = sanitizeString(match.id);
+    match.group = sanitizeString(match.group);
+    // Ensure round is a number, default to null if invalid
+    match.round = typeof match.round === 'number' ? match.round : (parseInt(match.round, 10) || null); 
+    match.home = sanitizeString(match.home);
+    match.away = sanitizeString(match.away);
+    match.hScore = sanitizeString(match.hScore);
+    match.aScore = sanitizeString(match.aScore);
+    match.status = sanitizeString(match.status);
+    match.winner = sanitizeString(match.winner);
+
+    // Ensure done is boolean, default to false if not
+    match.done = typeof match.done === 'boolean' ? match.done : false;
+    // Ensure time is number, default to 0
+    match.time = typeof match.time === 'number' ? match.time : (parseInt(match.time, 10) || 0);
+
+    // Sanitize events
+    if (!Array.isArray(match.events)) match.events = [];
+    match.events = match.events.map(event => {
+      if (!event || typeof event !== 'object') throw new Error("Invalid event data: expected an object.");
+      event.type = sanitizeString(event.type);
+      event.player = sanitizeString(event.player);
+      event.teamId = sanitizeString(event.teamId);
+      return event;
+    });
+    return match;
+  });
+
+  // Sanitize settings (minimal as they are internal config)
+  if (tournament.settings && typeof tournament.settings === 'object') {
+    tournament.settings.ptsWin = parseInt(tournament.settings.ptsWin, 10) || 0;
+    tournament.settings.ptsDraw = parseInt(tournament.settings.ptsDraw, 10) || 0;
+    tournament.settings.ptsLoss = parseInt(tournament.settings.ptsLoss, 10) || 0;
+    if (!Array.isArray(tournament.settings.tieBreakers)) tournament.settings.tieBreakers = [];
+    tournament.settings.tieBreakers = tournament.settings.tieBreakers.map(sanitizeString);
+  } else {
+    tournament.settings = {}; 
+  }
+
+  // Sanitize config (minimal)
+  if (tournament.config && typeof tournament.config === 'object') {
+    tournament.config.teamsPerGroup = parseInt(tournament.config.teamsPerGroup, 10) || 0;
+    tournament.config.qualifiersCount = parseInt(tournament.config.qualifiersCount, 10) || 0;
+    tournament.config.homeAwayEnabled = typeof tournament.config.homeAwayEnabled === 'boolean' ? tournament.config.homeAwayEnabled : false;
+  } else {
+    tournament.config = {};
+  }
+
+  return tournament; // Return the sanitized tournament object
 };
 
 // Generate HTML report content for a given tournament
 const generateTournamentReportHTMLServer = (tournament, type) => {
-  if (!tournament) return ""; 
+  // `tournament` is now guaranteed to be validated and sanitized
+  if (!tournament) return ""; // Should ideally not happen after validation
   const isFullReport = type === 'FULL_REPORT';
-  const escapedName = escapeHtml(tournament.name);
-  const escapedType = escapeHtml(tournament.type);
-  const { scorers, assisters, cards } = getPlayerStatsServer(tournament);
+  const escapedName = tournament.name; // Already sanitized
+  const escapedType = tournament.type; // Already sanitized
+  const { scorers, assisters, cards } = getPlayerStats(tournament);
 
   const renderStandings = () => {
     if (tournament.type === 'GROUPS') {
       const groups = [...new Set(tournament.matches.filter(m => m.group).map(m => m.group))];
       return groups.map(g => `
-        <h3 style="color:${COLORS.primary}; margin-top:15px">Group ${escapeHtml(g)}</h3>
+        <h3 style="color:${COLORS.primary}; margin-top:15px">Group ${g}</h3>
         <table>
           <tr><th style="text-align:left">TEAM</th><th>P</th><th>W</th><th>D</th><th>L</th><th>GD</th><th>PTS</th></tr>
-          ${getStatsServer({...tournament, matches: tournament.matches.filter(m => m.group === g)}).map(([id, s]) => `
-            <tr><td class="team-name">${escapeHtml(getTNServer(id, tournament))}</td><td>${s.p}</td><td>${s.w}</td><td>${s.d}</td><td>${s.l}</td><td>${s.gd}</td><td>${s.pts}</td></tr>
+          ${getStats({...tournament, matches: tournament.matches.filter(m => m.group === g)}).map(([id, s]) => `
+            <tr><td class="team-name">${getTN(id, tournament)}</td><td>${s.p}</td><td>${s.w}</td><td>${s.d}</td><td>${s.l}</td><td>${s.gd}</td><td>${s.pts}</td></tr>
           `).join('')}
         </table>
       `).join('');
     }
-    const stats = getStatsServer(tournament);
+    const stats = getStats(tournament);
     return `
       <table>
         <tr><th style="text-align:left">TEAM</th><th>P</th><th>W</th><th>D</th><th>L</th><th>GD</th><th>PTS</th></tr>
         ${stats.map(([id, s]) => `
           <tr>
-            <td class="team-name">${escapeHtml(getTNServer(id, tournament))}</td>
+            <td class="team-name">${getTN(id, tournament)}</td>
             <td>${s.p}</td><td>${s.w}</td><td>${s.d}</td><td>${s.l}</td><td>${s.gd}</td><td>${s.pts}</td>
           </tr>
         `).join('')}
@@ -155,8 +142,8 @@ const generateTournamentReportHTMLServer = (tournament, type) => {
         <tr><th style="text-align:left">MATCH</th><th>ROUND/GROUP</th><th>RESULT</th></tr>
         ${tournament.matches.map(m => `
           <tr>
-            <td class="team-name">${escapeHtml(getTNServer(m.home, tournament))} vs ${escapeHtml(getTNServer(m.away, tournament))}</td>
-            <td style="color:${COLORS.muted}; font-size:10px">${m.group ? 'Group '+escapeHtml(m.group) : (m.round ? 'Round '+m.round : 'League')}</td>
+            <td class="team-name">${getTN(m.home, tournament)} vs ${getTN(m.away, tournament)}</td>
+            <td style="color:${COLORS.muted}; font-size:10px">${m.group ? 'Group '+m.group : (m.round ? 'Round '+m.round : 'League')}</td>
             <td>${m.done ? `<b>${m.hScore} - ${m.aScore}</b>` : (m.status === 'LIVE' ? `<span style="color:${COLORS.primary}">LIVE</span>` : 'PENDING')}</td>
           </tr>
         `).join('')}
@@ -189,15 +176,15 @@ const generateTournamentReportHTMLServer = (tournament, type) => {
           <div style="width: 100%;">
             <div class="stat-box">
               <h3 style="color:${COLORS.primary}">Top Scorers</h3>
-              ${scorers.slice(0, 10).map(([n, c]) => `<div style="font-size:10px">${escapeHtml(n)}: <b>${c}</b></div>`).join('')}
+              ${scorers.slice(0, 10).map(([n, c]) => `<div style="font-size:10px">${n}: <b>${c}</b></div>`).join('')}
             </div>
             <div class="stat-box">
               <h3 style="color:${COLORS.accent}">Top Assists</h3>
-              ${assisters.slice(0, 10).map(([n, c]) => `<div style="font-size:10px">${escapeHtml(n)}: <b>${c}</b></div>`).join('')}
+              ${assisters.slice(0, 10).map(([n, c]) => `<div style="font-size:10px">${n}: <b>${c}</b></div>`).join('')}
             </div>
             <div class="stat-box">
               <h3 style="color:${COLORS.danger}">Cards</h3>
-              ${cards.slice(0, 10).map(([n, c]) => `<div style="font-size:10px">${escapeHtml(n)}: <b>${c}</b></div>`).join('')}
+              ${cards.slice(0, 10).map(([n, c]) => `<div style="font-size:10px">${n}: <b>${c}</b></div>`).join('')}
             </div>
           </div>
         ` : ''}
@@ -207,11 +194,13 @@ const generateTournamentReportHTMLServer = (tournament, type) => {
 };
 
 // Generate CSV report content for a given tournament
-const generateCSVReportServer = (tournament) => {
-  if (!tournament) return ''; 
+const generateCSVReport = (tournament) => {
+  // `tournament` is now guaranteed to be validated and sanitized
+  if (!tournament) return ''; // Should ideally not happen after validation
   let csv = "Match ID,Type,Home,Away,Home Score,Away Score,Status,Winner\n";
   tournament.matches.forEach(m => {
-    csv += `${m.id},${m.group ? 'Group '+m.group : (m.round ? 'Round '+m.round : 'League')},${getTNServer(m.home, tournament)},${getTNServer(m.away, tournament)},${m.hScore},${m.aScore},${m.status},${m.winner || ''}\n`;
+    // Ensure all values are strings and properly quoted for CSV safety, even though they are sanitized strings
+    csv += `"${m.id}","${m.group ? 'Group '+m.group : (m.round ? 'Round '+m.round : 'League')}","${getTN(m.home, tournament)}","${getTN(m.away, tournament)}","${m.hScore}","${m.aScore}","${m.status}","${m.winner || ''}"\n`;
   });
   return csv;
 };
@@ -220,14 +209,36 @@ const generateCSVReportServer = (tournament) => {
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type'); 
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.setHeader('Content-Type', 'application/json');
 
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   try {
+    // API Key Authentication
+    const EXPECTED_API_KEY = process.env.SERVERLESS_API_KEY;
+    const authorizationHeader = req.headers.authorization;
+
+    if (!EXPECTED_API_KEY) {
+      console.error("SERVERLESS_API_KEY environment variable is not set on the server.");
+      return res.status(500).json({ success: false, error: "Server configuration error: API key missing." });
+    }
+
+    if (!authorizationHeader || !authorizationHeader.startsWith('Bearer ')) {
+      console.warn("Unauthorized access attempt: Missing or invalid Authorization header.");
+      return res.status(401).json({ success: false, error: "Unauthorized: Missing or invalid Authorization header." });
+    }
+
+    const providedApiKey = authorizationHeader.split(' ')[1];
+
+    if (providedApiKey !== EXPECTED_API_KEY) {
+      console.warn("Unauthorized access attempt: Invalid API Key.");
+      return res.status(403).json({ success: false, error: "Forbidden: Invalid API Key." });
+    }
+    // End API Key Authentication
+
     if (req.method === 'POST') {
-      const { action, tournament, type } = req.body;
+      let { action, tournament, type } = req.body;
 
       console.log(`[${new Date().toISOString()}] Incoming Action: ${action}`);
       
@@ -237,31 +248,37 @@ module.exports = async (req, res) => {
 
       if (action === 'SHARE_ID') {
         if (!tournament || !tournament.name) {
-          return res.status(400).json({ success: false, error: "Invalid tournament data" });
+          return res.status(400).json({ success: false, error: "Invalid tournament data: tournament name is required for sharing." });
         }
+        // Sanitize name for use in message
+        const sanitizedName = sanitizeString(tournament.name);
         const shareId = Buffer.from(`${tournament.id}-${Date.now()}`).toString('base64').substring(0, 8);
         return res.status(200).json({
           success: true,
           shareId,
           shareUrl: `https://deeppitch-engine.vercel.app/view/${shareId}`,
           syncTime: new Date().toISOString(),
-          message: `Successfully synced ${tournament.name} to DeepPitch Cloud`
+          message: `Successfully synced ${sanitizedName} to DeepPitch Cloud`
         });
       }
 
-      if (action === 'GENERATE_PDF_HTML') {
-        if (!tournament) {
-          return res.status(400).json({ success: false, error: "Tournament data required" });
+      if (action === 'GENERATE_PDF_HTML' || action === 'GENERATE_CSV') {
+        try {
+          // Validate and sanitize the entire tournament object
+          tournament = validateAndSanitizeTournament(tournament);
+        } catch (validationError) {
+          console.error("Tournament validation error:", validationError.message);
+          return res.status(400).json({ success: false, error: validationError.message });
         }
+      }
+
+      if (action === 'GENERATE_PDF_HTML') {
         const htmlContent = generateTournamentReportHTMLServer(tournament, type);
         return res.status(200).json({ success: true, html: htmlContent });
       }
 
       if (action === 'GENERATE_CSV') {
-        if (!tournament) {
-          return res.status(400).json({ success: false, error: "Tournament data required" });
-        }
-        const csvContent = generateCSVReportServer(tournament);
+        const csvContent = generateCSVReport(tournament);
         return res.status(200).json({ success: true, csv: csvContent });
       }
 

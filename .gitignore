@@ -42,3 +42,4 @@ yarn-error.*
 combined_project_files.txt
 
 .vercel
+.env
