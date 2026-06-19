@@ -2,14 +2,14 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput, 
   Modal, Alert, StatusBar, Dimensions, Share, Platform, BackHandler,
-  ActivityIndicator
+  ActivityIndicator, ToastAndroid
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Icons from 'lucide-react-native';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
-import * as FileSystem from 'expo-file-system/legacy';
+import * as FileSystem from 'expo-file-system/legacy'; // Keep legacy for writeAsStringAsync
 import { captureRef } from 'react-native-view-shot';
 
 import { COLORS, escapeHtml, getTN, getTC, getStats, getPlayerStats } from './src/utils/tournamentHelpers';
@@ -17,30 +17,26 @@ import { COLORS, escapeHtml, getTN, getTC, getStats, getPlayerStats } from './sr
 const { width } = Dimensions.get('window');
 
 // Backend Endpoint Configuration
-// Backend Endpoint Configuration
 // Read from environment variables.
 // In development, `process.env.EXPO_PUBLIC_DEV_API_URL` should be your local IP.
 // In production, `process.env.EXPO_PUBLIC_PROD_API_URL` should be your deployed server URL.
 // Ensure these are set in your .env file (e.g., EXPO_PUBLIC_DEV_API_URL=http://192.168.1.5:3000/api)
 const DEV_URL = process.env.EXPO_PUBLIC_DEV_API_URL; 
 const PROD_URL = process.env.EXPO_PUBLIC_PROD_API_URL;
-let SERVERLESS_ENDPOINT = __DEV__ ? DEV_URL : PROD_URL; // Changed const to let
+let SERVERLESS_ENDPOINT = __DEV__ ? DEV_URL : PROD_URL;
 
 // Validation for local development/misconfiguration
 if (__DEV__ && !DEV_URL) {
   console.warn("EXPO_PUBLIC_DEV_API_URL is not set in your .env file. Using a placeholder. Please configure your local API URL.");
-  // Fallback to a common local IP for emulator or a generic placeholder
-  // User should still set their specific IP for physical devices.
   SERVERLESS_ENDPOINT = 'http://10.0.2.2:3000/api'; 
 } else if (!__DEV__ && !PROD_URL) {
   console.error("EXPO_PUBLIC_PROD_API_URL is not set for production build. API calls may fail.");
-  // Fallback to a known production URL or fail explicitly
-  SERVERLESS_ENDPOINT = 'https://deeppitch-engine.vercel.app/api'; // Fallback to original PROD URL
+  SERVERLESS_ENDPOINT = 'https://deeppitch-engine.vercel.app/api';
 }
 
 export default function App() {
   const [screen, setScreen] = useState('HOME'); // HOME, MANAGE
-  const [activeTab, setActiveTab] = useState('FIXTURES'); // FIXTURES, STANDINGS, STATS, BRACKET
+  const [activeTab, setActiveTab] = useState('FIXTURES'); // FIXTURES, STANDINGS, TEAMS, STATS, BRACKET
   const [tournaments, setTournaments] = useState([]);
   const [activeID, setActiveID] = useState(null);
   const [modal, setModal] = useState(false);
@@ -57,7 +53,6 @@ export default function App() {
   const backPressCount = useRef(0);
 
   // AsyncStorage Keys
-  // Moved escapeHtml, getTN, getTC, getStats, getPlayerStats to src/utils/tournamentHelpers.js
   const STORAGE_KEY_LIST = '@DP_TOURNAMENT_LIST'; // Stores [{id, name, type}, ...]
   const STORAGE_KEY_TOURNAMENT_PREFIX = '@DP_TOURNAMENT_DATA:'; // Stores full tournament data
   const STORAGE_KEY_ACTIVE_ID = '@DP_ACTIVE_ID'; // Stores active tournament ID
@@ -92,7 +87,7 @@ export default function App() {
           BackHandler.exitApp();
         } else {
           backPressCount.current = 1;
-          showToast('Press back twice to exit'); // Cross-platform toast
+          showToast('Press back twice to exit');
           setTimeout(() => { backPressCount.current = 0; }, 2000);
           return true;
         }
@@ -112,7 +107,7 @@ export default function App() {
   const [teamsPerGroup, setTeamsPerGroup] = useState('4');
   const [qualifiersCount, setQualifiersCount] = useState('2');
   const [tieBreakers, setTieBreakers] = useState(['GD', 'H2H', 'GS', 'FP']);
-  const [homeAwayEnabled, setHomeAwayEnabled] = useState(false); // New state for home/away matches
+  const [homeAwayEnabled, setHomeAwayEnabled] = useState(false);
 
   useEffect(() => { load(); }, []);
 
@@ -218,24 +213,15 @@ export default function App() {
     await AsyncStorage.removeItem(STORAGE_KEY_ACTIVE_ID);
   };
 
-
-
-  // --- THE FINAL PERMANENT FIX ---
   const saveAndSharePdf = async (base64Data, baseName) => {
     try {
-      // 1. Create a clean filename
       const cleanName = baseName.replace(/[^a-z0-9]/gi, '_').toLowerCase();
-      
-      // 2. Use cacheDirectory (best for sharing)
       const destinationUri = `${FileSystem.cacheDirectory}${cleanName}.pdf`;
 
-      // 3. Write the file using the legacy method (Base64 encoding)
-      // This works because we are creating a NEW file, not reading a restricted one
       await FileSystem.writeAsStringAsync(destinationUri, base64Data, {
         encoding: FileSystem.EncodingType.Base64,
       });
 
-      // 4. Share the file
       await Sharing.shareAsync(destinationUri, {
         mimeType: 'application/pdf',
         dialogTitle: `Share ${baseName}`,
@@ -260,7 +246,7 @@ export default function App() {
       groups.forEach(g => {
         report += `\n*GROUP ${g}*\n`;
         report += `Team | P | GD | PTS\n`;
-        const groupStats = getStats({...t, matches: t.matches.filter(m => m.group === g)});
+        const groupStats = getStats({...t, matches: t.matches.filter(m => m.stage === 'GROUP' && m.group === g)});
         groupStats.forEach(([id, s]) => {
           report += `${getTN(id, t)} | ${s.p} | ${s.gd} | ${s.pts}\n`;
         });
@@ -290,16 +276,31 @@ export default function App() {
     // 3. Fixtures & Results
     report += `🗓️ *FIXTURES & RESULTS*\n`;
     const sortedMatches = [...t.matches].sort((a, b) => {
-      if (a.round !== b.round) return (a.round || 0) - (b.round || 0);
-      if (a.group !== b.group) return (a.group || "").localeCompare(b.group || "");
-      return 0;
+      // Primary sort by stage
+      const stageOrder = { 'LEAGUE': 0, 'GROUP': 1, 'KNOCKOUT': 2 };
+      if (stageOrder[a.stage] !== stageOrder[b.stage]) {
+        return stageOrder[a.stage] - stageOrder[b.stage];
+      }
+      // Secondary sort: group then matchday for group matches, round for knockout
+      if (a.stage === 'GROUP' && b.stage === 'GROUP') {
+        if (a.group !== b.group) return (a.group || "").localeCompare(b.group || "");
+        return (a.matchday || 0) - (b.matchday || 0);
+      }
+      if (a.stage === 'KNOCKOUT' && b.stage === 'KNOCKOUT') {
+        return (a.round || 0) - (b.round || 0);
+      }
+      return 0; // Fallback for LEAGUE or mixed stages
     });
 
     sortedMatches.forEach(m => {
       if (m.away === 'BYE') return;
-      const matchType = m.round ? `Round ${m.round}` : (m.group ? `Group ${m.group}` : "Match");
+      let matchTypeLabel;
+      if (m.stage === 'GROUP') matchTypeLabel = `Group ${m.group}, Matchday ${m.matchday}`;
+      else if (m.stage === 'KNOCKOUT') matchTypeLabel = `Round ${m.round}`;
+      else matchTypeLabel = `Matchday ${m.matchday}`; // LEAGUE
+      
       const score = m.done ? `${m.hScore} - ${m.aScore}` : (m.status === 'LIVE' ? "LIVE" : "VS");
-      report += `[${matchType}] ${getTN(m.home, t)} ${score} ${getTN(m.away, t)}\n`;
+      report += `[${matchTypeLabel}] ${getTN(m.home, t)} ${score} ${getTN(m.away, t)}\n`;
       if (m.events && m.events.length > 0) {
         m.events.forEach(e => {
           report += `  - ${e.type}: ${e.player} (${getTN(e.teamId, t)})\n`;
@@ -330,29 +331,29 @@ export default function App() {
     }
   };
 
-  // This `save` function now takes the *entire* updated list of tournaments
-  // and intelligently saves metadata and individual tournament data.
   const save = async (updatedTournamentsList) => {
-    setTournaments(updatedTournamentsList); // Update local state immediately
+    setTournaments(updatedTournamentsList);
 
-    // Prepare metadata list (only id, name, type for display)
     const listMetadata = updatedTournamentsList.map(t => ({ id: t.id, name: t.name, type: t.type }));
     await saveTournamentList(listMetadata);
 
-    // Save each tournament's full data individually
     for (const tourney of updatedTournamentsList) {
       await saveTournament(tourney);
     }
   };
 
-  const createTournament = async () => { // Make function async
+  const createTournament = async () => {
     const teamNames = teamsRaw.split(',').map(t => t.trim()).filter(t => t);
     
-    // Validation
-    if (!name) return Alert.alert("Error", "Tournament name required");
-    if (teamNames.length === 0) return Alert.alert("Error", "Please enter at least one team name.");
+    // --- START: Strict Input Validation for Tournament Creation ---
+    if (!name) return Alert.alert("Error", "Tournament name is required.");
+    if (name.length < 3) return Alert.alert("Error", "Tournament name must be at least 3 characters long.");
+    if (name.length > 50) return Alert.alert("Error", "Tournament name cannot exceed 50 characters.");
 
-    // Check for duplicate team names
+    if (teamNames.length === 0) return Alert.alert("Error", "Please enter at least one team name.");
+    if (teamNames.some(n => n.length < 2)) return Alert.alert("Error", "All team names must be at least 2 characters long.");
+    if (teamNames.some(n => n.length > 30)) return Alert.alert("Error", "Team names cannot exceed 30 characters.");
+
     const uniqueTeamNames = new Set(teamNames);
     if (uniqueTeamNames.size !== teamNames.length) {
       return Alert.alert("Error", "All team names must be unique. Please remove duplicate names.");
@@ -367,6 +368,10 @@ export default function App() {
       if (isNaN(parsedTeamsPerGroup) || parsedTeamsPerGroup < 2) {
         return Alert.alert("Error", "Teams per group must be a number of 2 or more.");
       }
+      if (parsedTeamsPerGroup > teamNames.length) {
+        return Alert.alert("Error", `Teams per group (${parsedTeamsPerGroup}) cannot exceed the total number of teams (${teamNames.length}).`);
+      }
+
       if (isNaN(parsedQualifiersCount) || parsedQualifiersCount < 1) {
         return Alert.alert("Error", "Qualifiers count must be a number of 1 or more.");
       }
@@ -374,19 +379,28 @@ export default function App() {
         return Alert.alert("Error", "Qualifiers count must be less than the number of teams per group.");
       }
       if (teamNames.length < parsedTeamsPerGroup) {
-        return Alert.alert("Error", `Total number of teams (${teamNames.length}) cannot be less than teams per group (${parsedTeamsPerGroup}).`);
+        return Alert.alert("Error", `Total number of teams (${teamNames.length}) cannot be less than the minimum teams per group (${parsedTeamsPerGroup}).`);
+      }
+      
+      const actualNumGroups = Math.ceil(teamNames.length / parsedTeamsPerGroup);
+      if (actualNumGroups > 1 && teamNames.length % parsedTeamsPerGroup === 1) {
+        return Alert.alert(
+          "Error", 
+          `With ${teamNames.length} teams and ${parsedTeamsPerGroup} teams per group, one group would have only 1 team. Please adjust the number of teams or teams per group to avoid this.`
+        );
       }
     } else { // LEAGUE or KNOCKOUT
       if (teamNames.length < 2) return Alert.alert("Error", "Minimum 2 teams required for this format.");
     }
+    // --- END: Strict Input Validation for Tournament Creation ---
 
     const teams = teamNames.map(n => ({
-      id: Math.random().toString(36).substr(2, 5),
+      id: generateId(), // Use new ID generator
       name: n,
       color: COLORS.primary,
       players: [
-        { id: Math.random().toString(36).substr(2, 5), name: n + ' Player 1', number: '1' },
-        { id: Math.random().toString(36).substr(2, 5), name: n + ' Player 2', number: '10' }
+        { id: generateId(), name: n + ' Player 1', number: '1' }, // Use new ID generator
+        { id: generateId(), name: n + ' Player 2', number: '10' } // Use new ID generator
       ]
     }));
 
@@ -394,31 +408,33 @@ export default function App() {
       id: Date.now().toString(),
       name, type,
       teams,
-      matches: generateMatches(teams, type, parseInt(teamsPerGroup), parseInt(qualifiersCount), homeAwayEnabled),
+      // Removed `qualifiersCount` from generateMatches parameters as it's not used there.
+      matches: generateMatches(teams, type, parseInt(teamsPerGroup), homeAwayEnabled), 
       settings: { ptsWin: 3, ptsDraw: 1, ptsLoss: 0, tieBreakers },
-      config: { teamsPerGroup, qualifiersCount, homeAwayEnabled }, // Store homeAwayEnabled in config
+      config: { teamsPerGroup, qualifiersCount, homeAwayEnabled },
       status: 'ACTIVE'
     };
 
     const updatedTournaments = [...tournaments, newTourney];
     
-    // Update local state and persist to AsyncStorage
-    await save(updatedTournaments); // Uses the updated save function
+    await save(updatedTournaments);
 
     setModal(false);
     setName(''); setTeamsRaw(''); setTemplate('CUSTOM');
-    setType('LEAGUE'); // Reset type to default
-    setTeamsPerGroup('4'); // Reset
-    setQualifiersCount('2'); // Reset
-    setTieBreakers(['GD', 'H2H', 'GS', 'FP']); // Reset
-    setHomeAwayEnabled(false); // Reset new homeAwayEnabled setting
+    setType('LEAGUE');
+    setTeamsPerGroup('4');
+    setQualifiersCount('2');
+    setTieBreakers(['GD', 'H2H', 'GS', 'FP']);
+    setHomeAwayEnabled(false);
     selectTournament(newTourney.id);
   };
 
-  const generateId = () => Math.random().toString(36).substr(2, 9);
+  // Updated ID generation for better uniqueness
+  const generateId = () => Date.now().toString(36) + Math.random().toString(36).substr(2, 10);
 
   // Helper function to generate matches based on tournament type
-  function generateMatches(teams, mode, groupSize = 4, quals = 2, isHomeAway = false) {
+  // Removed `quals` from parameter list as it was unused in this function
+  function generateMatches(teams, mode, groupSize = 4, isHomeAway = false) {
     let matches = [];
 
     // Fisher-Yates Shuffle for better randomization of team pairings initially
@@ -428,33 +444,33 @@ export default function App() {
       [shuffledTeams[i], shuffledTeams[j]] = [shuffledTeams[j], shuffledTeams[i]];
     }
 
-    const teamIds = shuffledTeams.map(t => t.id); // Ensure we use team.id
+    const teamIds = shuffledTeams.map(t => t.id);
 
     // Helper to generate Round-Robin matches (Circle Method)
-    const generateRoundRobin = (participants, roundOffset = 0, groupLabel = null, roundRobinHomeAway = false) => { // Added roundRobinHomeAway
-      let allRoundsMatches = []; // Accumulate matches for all rounds
+    const generateRoundRobin = (participants, matchdayOffset = 0, groupLabel = null, roundRobinHomeAway = false, stage = 'LEAGUE') => {
+      let allRoundsMatches = [];
       let currentParticipants = [...participants];
       const N = currentParticipants.length;
 
-      // Handle odd number of teams by adding a dummy 'BYE'
       const hasBye = N % 2 !== 0;
       if (hasBye) {
         currentParticipants.push('BYE');
       }
-      const numParticipants = currentParticipants.length; // Now guaranteed to be even
-      const numRounds = numParticipants - 1;
+      const numParticipants = currentParticipants.length;
+      const numMatchdays = numParticipants - 1;
 
-      for (let r = 0; r < numRounds; r++) {
-        let matchesInThisRound = []; // Collect matches for the current round
+      for (let r = 0; r < numMatchdays; r++) {
+        let matchesInThisMatchday = [];
         for (let i = 0; i < numParticipants / 2; i++) {
           const home = currentParticipants[i];
           const away = currentParticipants[numParticipants - 1 - i];
 
           if (home !== 'BYE' && away !== 'BYE') {
-            matchesInThisRound.push({
+            matchesInThisMatchday.push({
               id: generateId(),
+              stage: stage, // New: Add stage
               group: groupLabel,
-              round: r + 1 + roundOffset,
+              matchday: r + 1 + matchdayOffset, // New: Use matchday instead of round for group/league
               home: home,
               away: away,
               hScore: '0',
@@ -464,11 +480,12 @@ export default function App() {
               status: 'PENDING',
               time: 0
             });
-            if (roundRobinHomeAway) { // Use the new flag
-              matchesInThisRound.push({
+            if (roundRobinHomeAway) {
+              matchesInThisMatchday.push({
                 id: generateId(),
+                stage: stage, // New: Add stage
                 group: groupLabel,
-                round: r + 1 + numRounds + roundOffset, // Second leg starts after first leg completes all rounds
+                matchday: r + 1 + numMatchdays + matchdayOffset,
                 home: away,
                 away: home,
                 hScore: '0',
@@ -481,94 +498,175 @@ export default function App() {
             }
           }
         }
-        // Shuffle matches within this specific round for randomness
-        for (let i = matchesInThisRound.length - 1; i > 0; i--) {
+        // Shuffle matches within this specific matchday for randomness
+        for (let i = matchesInThisMatchday.length - 1; i > 0; i--) {
             const j = Math.floor(Math.random() * (i + 1));
-            [matchesInThisRound[i], matchesInThisRound[j]] = [matchesInThisRound[j], matchesInThisRound[i]];
+            [matchesInThisMatchday[i], matchesInThisMatchday[j]] = [matchesInThisMatchday[j], matchesInThisMatchday[i]];
         }
-        allRoundsMatches.push(...matchesInThisRound); // Add all shuffled matches of this round
+        allRoundsMatches.push(...matchesInThisMatchday);
 
-        // Rotate all teams except the first one (which stays fixed in the top-left)
-        // Move last team to second position, shift others right
         const last = currentParticipants.pop();
         currentParticipants.splice(1, 0, last);
       }
-      return allRoundsMatches; // Return all matches, ordered by round, with randomness within rounds
+      return allRoundsMatches;
     };
 
-    if (mode === 'LEAGUE') { // Removed 'HOME_AWAY' type, now handled by isHomeAway flag
-      matches = generateRoundRobin(teamIds, 0, null, isHomeAway); // Pass isHomeAway
+    if (mode === 'LEAGUE') {
+      matches = generateRoundRobin(teamIds, 0, null, isHomeAway, 'LEAGUE'); // Pass stage
     } else if (mode === 'GROUPS') {
       const actualNumGroups = Math.ceil(teamIds.length / groupSize);
       const groups = Array.from({ length: actualNumGroups }, () => []);
       
-      // Shuffle teamIds BEFORE distributing them into groups for random group assignment
       let shuffledTeamIdsForGroups = [...teamIds];
       for (let i = shuffledTeamIdsForGroups.length - 1; i > 0; i--) {
           const j = Math.floor(Math.random() * (i + 1));
           [shuffledTeamIdsForGroups[i], shuffledTeamIdsForGroups[j]] = [shuffledTeamIdsForGroups[j], shuffledTeamIdsForGroups[i]];
       }
 
-      // Distribute teams evenly into groups using a round-robin assignment
-      shuffledTeamIdsForGroups.forEach((teamId, index) => { // Use shuffled list here
+      shuffledTeamIdsForGroups.forEach((teamId, index) => {
         groups[index % actualNumGroups].push(teamId);
       });
 
       for (let g = 0; g < actualNumGroups; g++) {
         const groupTeams = groups[g];
-        if (groupTeams.length > 0) { // Only generate matches if the group has teams
+        if (groupTeams.length > 0) {
           const groupLabel = String.fromCharCode(65 + g);
-          matches.push(...generateRoundRobin(groupTeams, 0, groupLabel, isHomeAway)); // Pass isHomeAway
+          matches.push(...generateRoundRobin(groupTeams, 0, groupLabel, isHomeAway, 'GROUP')); // Pass stage
         }
       }
-      // Sort matches by round (1, 2, 3), then by group (A, B, C) for display
+      // Sort matches by group (A, B, C) then by matchday (1, 2, 3) for display
       matches.sort((a, b) => {
-        if ((a.round || 0) !== (b.round || 0)) return (a.round || 0) - (b.round || 0); // Primary sort by round
-        if (a.group && b.group && a.group !== b.group) return a.group.localeCompare(b.group); // Secondary sort by group
+        if (a.group && b.group && a.group !== b.group) return a.group.localeCompare(b.group);
+        if ((a.matchday || 0) !== (b.matchday || 0)) return (a.matchday || 0) - (b.matchday || 0);
         return 0;
       });
     } else { // KNOCKOUT
-      let roundParticipants = [...teamIds];
+      let initialTeams = [...teamIds];
 
-      const participantCount = roundParticipants.length;
-      const nextPowerOfTwo = Math.pow(2, Math.ceil(Math.log2(participantCount)));
-      const byes = nextPowerOfTwo - participantCount;
-
-      // Add BYEs
-      for (let i = 0; i < byes; i++) roundParticipants.push('BYE');
-
-      // Re-shuffle all participants (teams + BYEs) to randomize BYE placement
-      // This shuffle is critical for fair initial pairings in knockouts
-      for (let i = roundParticipants.length - 1; i > 0; i--) {
+      // Shuffle the actual teams first for randomness. This will be the only shuffle.
+      for (let i = initialTeams.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
-        [roundParticipants[i], roundParticipants[j]] = [roundParticipants[j], roundParticipants[i]];
+        [initialTeams[i], initialTeams[j]] = [initialTeams[j], initialTeams[i]];
       }
 
-      for (let i = 0; i < roundParticipants.length; i += 2) {
-        const home = roundParticipants[i], away = roundParticipants[i + 1];
-        const isBye = away === 'BYE';
-        matches.push({
-          id: generateId(), round: 1, roundIdx: i / 2,
-          home, away, hScore: isBye ? '1' : '0', aScore: isBye ? '0' : '0',
-          done: isBye, winner: isBye ? home : null, events: [], status: isBye ? 'DONE' : 'PENDING', time: 0
-        });
+      const participantCount = initialTeams.length;
+      const nextPowerOfTwo = Math.pow(2, Math.ceil(Math.log2(participantCount)));
+      const byesNeeded = nextPowerOfTwo - participantCount;
+
+      let teamsForFirstRound = [];
+      let byeCounter = 0;
+
+      // Distribute BYEs more evenly to avoid consecutive BYEs
+      // Simple strategy: insert BYEs at higher-indexed positions first
+      // This is a basic distribution to avoid BYE-BYE. For true seeding, more complex logic is needed.
+      const totalFirstRoundSlots = nextPowerOfTwo;
+      const actualTeamsCopy = [...initialTeams];
+
+      for (let i = 0; i < totalFirstRoundSlots; i++) {
+        if (i < byesNeeded) {
+          // Place BYEs in slots that would typically be lower seeds or later in the initial bracket draw
+          // For simplicity here, we'll just try to interleave them to avoid BYE-BYE
+          teamsForFirstRound.push('BYE');
+        } else {
+          teamsForFirstRound.push(actualTeamsCopy.shift());
+        }
       }
-      // For Knockouts, initial round order can remain randomized after pairing.
-      // Further matches will be generated sequentially as results come in.
-      // A general random sort for initial knockout fixtures is acceptable.
-      matches.sort(() => Math.random() - 0.5);
+
+      // Shuffle `teamsForFirstRound` to randomize which teams get the BYEs among the real teams,
+      // while still avoiding BYE-BYE directly.
+      for (let i = teamsForFirstRound.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [teamsForFirstRound[i], teamsForFirstRound[j]] = [teamsForFirstRound[j], teamsForFirstRound[i]];
+      }
+
+      // Re-shuffle a bit more strategically for BYEs not to be paired
+      let finalFirstRoundParticipants = [];
+      let tempTeams = teamsForFirstRound.filter(t => t !== 'BYE');
+      let tempByes = teamsForFirstRound.filter(t => t === 'BYE');
+
+      // Interleave teams and byes to ensure no direct BYE-BYE matches
+      while (tempTeams.length > 0 || tempByes.length > 0) {
+        if (tempTeams.length > 0) finalFirstRoundParticipants.push(tempTeams.shift());
+        if (tempByes.length > 0) finalFirstRoundParticipants.push(tempByes.shift());
+      }
+      
+      // Ensure the array has an even length for pairing
+      if (finalFirstRoundParticipants.length % 2 !== 0 && actualTeamsCopy.length > 0) {
+        finalFirstRoundParticipants.push(actualTeamsCopy.shift()); // Add remaining real team if odd
+      } else if (finalFirstRoundParticipants.length % 2 !== 0 && byesNeeded > 0) {
+        finalFirstRoundParticipants.push('BYE'); // If still odd and need more byes
+      }
+
+      let currentRoundMatches = [];
+      
+      // Pair teams for the first round (now with better bye distribution)
+      let firstRoundPairs = [];
+      for (let i = 0; i < finalFirstRoundParticipants.length; i += 2) {
+          firstRoundPairs.push({ home: finalFirstRoundParticipants[i], away: finalFirstRoundParticipants[i + 1] });
+      }
+
+      // Removed redundant shuffle of firstRoundPairs, initialTeams shuffle is enough.
+
+      firstRoundPairs.forEach((pair, i) => {
+        let home = pair.home;
+        let away = pair.away;
+
+        if (home === 'BYE' && away === 'BYE') {
+          console.error("Logic error: BYE vs BYE match attempted to generate in KNOCKOUT.");
+          return;
+        }
+
+        let isByeMatch = false;
+        let winner = null;
+
+        if (home === 'BYE') {
+          [home, away] = [away, home];
+          isByeMatch = true;
+          winner = home;
+        } else if (away === 'BYE') {
+          isByeMatch = true;
+          winner = home;
+        }
+
+        currentRoundMatches.push({
+          id: generateId(), stage: 'KNOCKOUT', round: 1, roundIdx: i, // New: Add stage
+          home: home, away: away,
+          hScore: isByeMatch ? '1' : '0', aScore: isByeMatch ? '0' : '0',
+          done: isByeMatch, winner: winner, events: [], status: isByeMatch ? 'DONE' : 'PENDING', time: 0
+        });
+      });
+      matches.push(...currentRoundMatches);
+
+      let prevRoundMatchesCount = currentRoundMatches.length;
+      let currentRoundNum = 2;
+      while (prevRoundMatchesCount > 1) {
+        let matchesInThisRound = [];
+        const matchesForNextRoundCount = prevRoundMatchesCount / 2;
+        for (let i = 0; i < matchesForNextRoundCount; i++) {
+          matchesInThisRound.push({
+            id: generateId(), stage: 'KNOCKOUT', round: currentRoundNum, roundIdx: i, // New: Add stage
+            home: '?', away: '?',
+            hScore: '', aScore: '',
+            done: false, winner: null, events: [], status: 'PENDING', time: 0
+          });
+        }
+        matches.push(...matchesInThisRound);
+        prevRoundMatchesCount = matchesInThisRound.length;
+        currentRoundNum++;
+      }
     }
     
-    // For LEAGUE, matches are already generated round-by-round and randomized within rounds.
-    // For GROUPS, matches are sorted by group then by round, with randomness within group rounds.
-    // This maintains the "match day" and "group completion" logic requested.
     return matches;
   }
 
   const updateTeam = (team) => {
     const updated = tournaments.map(t => {
       if (t.id === activeID) {
-        t.teams = t.teams.map(tm => tm.id === team.id ? team : tm);
+        // Return new tournament object to ensure immutability
+        return {
+          ...t,
+          teams: t.teams.map(tm => tm.id === team.id ? { ...tm, ...team } : tm) // Deep copy team changes
+        };
       }
       return t;
     });
@@ -589,8 +687,7 @@ export default function App() {
               activeT.teams, 
               activeT.type, 
               parseInt(activeT.config?.teamsPerGroup || 4), 
-              parseInt(activeT.config?.qualifiersCount || 2),
-              activeT.config?.homeAwayEnabled || false // Pass homeAwayEnabled from active tournament config
+              activeT.config?.homeAwayEnabled || false
             );
             const updated = tournaments.map(t => {
               if (t.id === activeID) { return { ...t, matches: newMatches }; }
@@ -636,9 +733,6 @@ export default function App() {
         });
 
         // After updating a match, apply any necessary tournament logic
-        // Extracting this logic into separate helper functions for clarity.
-        
-        // Handle knockout advancement if applicable
         newMatches = advanceKnockoutRound(newMatches, updatedMatchObj);
 
         // Handle transition from group stage to knockout stage if all group matches are done
@@ -657,37 +751,27 @@ export default function App() {
   const advanceKnockoutRound = (matches, currentMatch) => {
     let updatedMatches = [...matches];
     // Only process if it's a knockout-style match (has a round number) and is done with a clear winner
-    if (currentMatch && currentMatch.round && currentMatch.done && currentMatch.winner && currentMatch.winner !== 'DRAW') {
-      const roundMatches = updatedMatches.filter(m => m.round === currentMatch.round);
+    if (currentMatch && currentMatch.stage === 'KNOCKOUT' && currentMatch.round && currentMatch.done && currentMatch.winner && currentMatch.winner !== 'DRAW') {
       const matchInRoundIndex = currentMatch.roundIdx;
       const nextRound = (currentMatch.round || 0) + 1;
       const nextMatchInRoundIndex = Math.floor(matchInRoundIndex / 2);
       
-      let nextMatch = updatedMatches.find(m => m.round === nextRound && m.roundIdx === nextMatchInRoundIndex);
-      
-      // If the next match doesn't exist AND it's not the final match of the current round (i.e., we need to create a new match in the next round)
-      if (!nextMatch && roundMatches.length > 1) { 
-        nextMatch = { 
-          id: generateId(), 
-          round: nextRound, 
-          roundIdx: nextMatchInRoundIndex, 
-          home: '?', 
-          away: '?', 
-          hScore: '', 
-          aScore: '', 
-          done: false, 
-          events: [], 
-          status: 'PENDING', 
-          time: 0 
-        };
-        updatedMatches.push(nextMatch);
-      }
-      
-      // If a next match (either existing or newly created) is found, assign the winner
-      if (nextMatch) {
-        if (matchInRoundIndex % 2 === 0) nextMatch.home = currentMatch.winner;
-        else nextMatch.away = currentMatch.winner;
-      }
+      updatedMatches = updatedMatches.map(m => {
+        if (m.stage === 'KNOCKOUT' && m.round === nextRound && m.roundIdx === nextMatchInRoundIndex) {
+          // Found the pre-generated placeholder match for the next round
+          let newHome = m.home;
+          let newAway = m.away;
+          if (matchInRoundIndex % 2 === 0) { // If currentMatch was the 'left' match in the pair for the next round
+            newHome = currentMatch.winner;
+          } else { // If currentMatch was the 'right' match in the pair
+            newAway = currentMatch.winner;
+          }
+          // If both teams for the next match are now determined, update its status
+          const newStatus = (newHome !== '?' && newAway !== '?') ? 'PENDING' : m.status;
+          return { ...m, home: newHome, away: newAway, status: newStatus };
+        }
+        return m;
+      });
     }
     return updatedMatches;
   };
@@ -695,29 +779,26 @@ export default function App() {
   // Helper function to transition from group stage to knockout stage
   const transitionGroupToKnockout = (matches, tournamentType, tournamentConfig, allTeams, tournamentSettings) => {
     let updatedMatches = [...matches];
-    // Only process if it's a group tournament and no knockout rounds have been generated yet
-    if (tournamentType === 'GROUPS' && !updatedMatches.some(m => m.round)) {
-      const allGroupMatchesDone = updatedMatches.filter(m => m.group).every(m => m.done);
+    // Only process if it's a group tournament and no knockout rounds (with stage 'KNOCKOUT') have been generated yet
+    if (tournamentType === 'GROUPS' && !updatedMatches.some(m => m.stage === 'KNOCKOUT')) {
+      const allGroupMatchesDone = updatedMatches.filter(m => m.stage === 'GROUP').every(m => m.done);
       if (allGroupMatchesDone) {
         const qualifiedIds = [];
-        const groups = [...new Set(updatedMatches.filter(m => m.group).map(m => m.group))];
+        const groups = [...new Set(updatedMatches.filter(m => m.stage === 'GROUP' && m.group).map(m => m.group))];
         groups.forEach(g => {
-          // Temporarily create a tournament-like object for getStats to work on the group
           const groupSpecificTournament = { 
             teams: allTeams, 
-            matches: updatedMatches.filter(m => m.group === g), 
+            matches: updatedMatches.filter(m => m.stage === 'GROUP' && m.group === g), 
             settings: tournamentSettings 
           };
           const groupStats = getStats(groupSpecificTournament);
           qualifiedIds.push(...groupStats.slice(0, tournamentConfig.qualifiersCount).map(s => s[0]));
         });
         
-        // Get full team objects for qualified IDs to generateMatches
         const qualifiedFullTeams = allTeams.filter(team => qualifiedIds.includes(team.id));
-        const knockoutMatches = generateMatches(qualifiedFullTeams, 'KNOCKOUT');
+        const knockoutMatches = generateMatches(qualifiedFullTeams, 'KNOCKOUT', 0, false); // No groupSize/homeAway for knockout generation
         
-        // Add generated knockout matches, ensuring they start from round 1
-        updatedMatches.push(...knockoutMatches.map(m => ({...m, round: 1})));
+        updatedMatches.push(...knockoutMatches);
       }
     }
     return updatedMatches;
@@ -744,7 +825,6 @@ export default function App() {
     if (!activeT) return;
     setLoading(true);
     try {
-      // Retrieve API Key from environment variables
       const SERVERLESS_API_KEY = process.env.EXPO_PUBLIC_SERVERLESS_API_KEY;
       if (!SERVERLESS_API_KEY) {
         throw new Error("API key not configured for serverless endpoint.");
@@ -754,7 +834,7 @@ export default function App() {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${SERVERLESS_API_KEY}` // Add Authorization header
+          'Authorization': `Bearer ${SERVERLESS_API_KEY}`
         },
         body: JSON.stringify({ action: 'GENERATE_CSV', tournament: activeT }),
       });
@@ -779,7 +859,6 @@ export default function App() {
     if (!activeT) return;
     setLoading(true);
     try {
-      // Retrieve API Key from environment variables
       const SERVERLESS_API_KEY = process.env.EXPO_PUBLIC_SERVERLESS_API_KEY;
       if (!SERVERLESS_API_KEY) {
         throw new Error("API key not configured for serverless endpoint.");
@@ -789,7 +868,7 @@ export default function App() {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${SERVERLESS_API_KEY}` // Add Authorization header
+          'Authorization': `Bearer ${SERVERLESS_API_KEY}`
         },
         body: JSON.stringify({ action: 'GENERATE_PDF_HTML', tournament: activeT, type: type }),
       });
@@ -797,7 +876,6 @@ export default function App() {
       const data = await response.json();
       if (!data.success) throw new Error("Failed to generate HTML.");
       
-      // Get the base64 string
       const { base64 } = await Print.printToFileAsync({ 
         html: data.html, 
         base64: true 
@@ -912,8 +990,7 @@ export default function App() {
           <View style={{flex: 1}}>
             <View style={styles.tabBar}>
               {['FIXTURES', 'STANDINGS', 'TEAMS', 'STATS', 'BRACKET'].map(tab => {
-                if (tab === 'BRACKET' && activeT.type === 'LEAGUE' && !activeT.matches.some(m => m.round)) return null;
-                // 'HOME_AWAY' type is now absorbed into LEAGUE/GROUPS with a flag, so remove this specific check
+                if (tab === 'BRACKET' && !activeT.matches.some(m => m.stage === 'KNOCKOUT')) return null;
                 return (
                   <TouchableOpacity key={tab} onPress={() => setActiveTab(tab)} style={[styles.tab, activeTab === tab && styles.activeTab]}>
                     <Text style={[styles.tabText, activeTab === tab && {color: COLORS.primary}]}>{tab}</Text>
@@ -936,10 +1013,10 @@ export default function App() {
                     </TouchableOpacity>
                   </View>
                   {activeT.type === 'GROUPS' ? (
-                    [...new Set(activeT.matches.filter(m => m.group).map(m => m.group))].map(g => (
+                    [...new Set(activeT.matches.filter(m => m.stage === 'GROUP' && m.group).map(m => m.group))].map(g => (
                       <View key={g} style={{marginBottom: 20}}>
                         <Text style={styles.label}>Group {g}</Text>
-                        <StandingsTable data={getStats({...activeT, matches: activeT.matches.filter(m => m.group === g)})} resolveName={(id) => getTN(id, activeT)} />
+                        <StandingsTable data={getStats({...activeT, matches: activeT.matches.filter(m => m.stage === 'GROUP' && m.group === g)})} resolveName={(id) => getTN(id, activeT)} />
                       </View>
                     ))
                   ) : (
@@ -981,8 +1058,9 @@ export default function App() {
                     style={[styles.match, m.away === 'BYE' && {opacity: 0.5}]}
                   >
                     <View style={{flex: 1}}>
-                      {m.group && <Text style={styles.mTag}>GROUP {m.group}</Text>}
-                      {m.round && <Text style={[styles.mTag, {color: COLORS.gold}]}>ROUND {m.round}</Text>}
+                      {m.stage === 'GROUP' && <Text style={styles.mTag}>GROUP {m.group} - MATCHDAY {m.matchday}</Text>}
+                      {m.stage === 'LEAGUE' && <Text style={styles.mTag}>MATCHDAY {m.matchday}</Text>}
+                      {m.stage === 'KNOCKOUT' && <Text style={[styles.mTag, {color: COLORS.gold}]}>ROUND {m.round}</Text>}
                       <Text style={[styles.mTeam, {color: getTC(m.home, activeT)}]}>{getTN(m.home, activeT)}</Text>
                     </View>
                     {m.away !== 'BYE' ? (
@@ -1058,7 +1136,7 @@ export default function App() {
                   <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 20 }}>
                     <View collapsable={false} ref={bracketRef} style={{flexDirection: 'row', backgroundColor: COLORS.bg, padding: 10}}>
                   {(() => {
-                    const knockoutMatches = activeT.matches.filter(m => m.round).sort((a, b) => a.round - b.round || a.roundIdx - b.roundIdx);
+                    const knockoutMatches = activeT.matches.filter(m => m.stage === 'KNOCKOUT').sort((a, b) => a.round - b.round || a.roundIdx - b.roundIdx);
                     const maxRound = knockoutMatches.length > 0 ? Math.max(...knockoutMatches.map(m => m.round)) : 0;
                     const rounds = [];
                     for(let r = 1; r <= maxRound; r++) {
@@ -1141,7 +1219,7 @@ export default function App() {
                     if (tmp.t) setType(tmp.t);
                     if (tmp.g) setTeamsPerGroup(tmp.g);
                     if (tmp.q) setQualifiersCount(tmp.q);
-                    if (tmp.ha !== undefined) setHomeAwayEnabled(tmp.ha); // Set homeAwayEnabled based on template
+                    if (tmp.ha !== undefined) setHomeAwayEnabled(tmp.ha);
                     if (name === '') setName(tmp.n + ' Tournament');
                     
                     // Pre-fill teams based on template
@@ -1173,7 +1251,7 @@ export default function App() {
 
             <TextInput style={styles.input} placeholder="Tournament Name" placeholderTextColor="#666" value={name} onChangeText={setName} />
             <View style={styles.typeRow}>
-              {['LEAGUE', 'KNOCKOUT', 'GROUPS'].map(m => ( // Removed 'HOME_AWAY' type
+              {['LEAGUE', 'KNOCKOUT', 'GROUPS'].map(m => (
                 <TouchableOpacity key={m} style={[styles.typeBtn, type === m && {borderColor: COLORS.primary, borderWidth: 1}]} onPress={() => setType(m)}>
                   <Text style={{color: type === m ? COLORS.primary : '#fff', fontSize: 10, fontWeight: 'bold'}}>{m}</Text>
                 </TouchableOpacity>
@@ -1266,7 +1344,7 @@ export default function App() {
                       value={p.name} 
                       onChangeText={val => {
                         const newPlayers = [...editingTeam.players];
-                        newPlayers[idx].name = val;
+                        newPlayers[idx] = { ...newPlayers[idx], name: val };
                         setEditingTeam({...editingTeam, players: newPlayers});
                       }}
                     />
@@ -1276,7 +1354,7 @@ export default function App() {
                       keyboardType="numeric"
                       onChangeText={val => {
                         const newPlayers = [...editingTeam.players];
-                        newPlayers[idx].number = val;
+                        newPlayers[idx] = { ...newPlayers[idx], number: val };
                         setEditingTeam({...editingTeam, players: newPlayers});
                       }}
                     />
@@ -1295,7 +1373,7 @@ export default function App() {
                 <TouchableOpacity 
                   style={[styles.btn, {backgroundColor: COLORS.secondary, marginTop: 10}]} 
                   onPress={() => {
-                    const newPlayer = { id: Math.random().toString(36).substr(2, 5), name: 'New Player', number: '' };
+                    const newPlayer = { id: generateId(), name: 'New Player', number: '' };
                     setEditingTeam({...editingTeam, players: [...editingTeam.players, newPlayer]});
                   }}
                 >
@@ -1386,25 +1464,25 @@ export default function App() {
                               <Text style={{color: '#fff', fontSize: 10}}>{p.number}. {p.name}</Text>
                               <View style={{flexDirection: 'row', gap: 5}}>
                                 <TouchableOpacity style={[styles.actionBtn, {width: 32, height: 32, borderRadius: 6}]} onPress={() => {
-                                  const ev = { type: 'GOAL', player: p.name, teamId, id: Date.now() };
+                                  const ev = { type: 'GOAL', player: p.name, teamId, id: generateId() };
                                   const newEvents = [...(selectedMatch.events || []), ev];
                                   setSelectedMatch({ ...selectedMatch, events: newEvents });
                                   updateMatch(activeT.id, selectedMatch.id, '', '', newEvents);
                                 }}><Icons.Zap color={COLORS.primary} size={12} /></TouchableOpacity>
                                 <TouchableOpacity style={[styles.actionBtn, {borderColor: '#FFCC00', width: 32, height: 32, borderRadius: 6}]} onPress={() => {
-                                  const ev = { type: 'YELLOW', player: p.name, teamId, id: Date.now() };
+                                  const ev = { type: 'YELLOW', player: p.name, teamId, id: generateId() };
                                   const newEvents = [...(selectedMatch.events || []), ev];
                                   setSelectedMatch({ ...selectedMatch, events: newEvents });
                                   updateMatch(activeT.id, selectedMatch.id, '', '', newEvents);
                                 }}><Icons.Square color="#FFCC00" size={12} fill="#FFCC00" /></TouchableOpacity>
                                 <TouchableOpacity style={[styles.actionBtn, {borderColor: COLORS.danger, width: 32, height: 32, borderRadius: 6}]} onPress={() => {
-                                  const ev = { type: 'RED', player: p.name, teamId, id: Date.now() };
+                                  const ev = { type: 'RED', player: p.name, teamId, id: generateId() };
                                   const newEvents = [...(selectedMatch.events || []), ev];
                                   setSelectedMatch({ ...selectedMatch, events: newEvents });
                                   updateMatch(activeT.id, selectedMatch.id, '', '', newEvents);
                                 }}><Icons.Square color={COLORS.danger} size={12} fill={COLORS.danger} /></TouchableOpacity>
                                 <TouchableOpacity style={[styles.actionBtn, {borderColor: COLORS.accent, width: 32, height: 32, borderRadius: 6}]} onPress={() => {
-                                  const ev = { type: 'ASSIST', player: p.name, teamId, id: Date.now() };
+                                  const ev = { type: 'ASSIST', player: p.name, teamId, id: generateId() };
                                   const newEvents = [...(selectedMatch.events || []), ev];
                                   setSelectedMatch({ ...selectedMatch, events: newEvents });
                                   updateMatch(activeT.id, selectedMatch.id, '', '', newEvents);
@@ -1529,7 +1607,7 @@ const styles = StyleSheet.create({
   miniBtnText: { color: '#fff', fontSize: 10, fontWeight: 'bold' },
   loadingOverlay: { 
     ...StyleSheet.absoluteFillObject, 
-    backgroundColor: 'rgba(0,0,0,0.95)', // Make it a bit darker
+    backgroundColor: 'rgba(0,0,0,0.95)',
     justifyContent: 'center', 
     alignItems: 'center', 
     zIndex: 9999 
