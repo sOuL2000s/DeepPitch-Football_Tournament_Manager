@@ -512,7 +512,9 @@ export default function App() {
     };
 
     if (mode === 'LEAGUE') {
-      matches = generateRoundRobin(teamIds, 0, null, isHomeAway, 'LEAGUE'); // Pass stage
+      matches = generateRoundRobin(teamIds, 0, null, isHomeAway, 'LEAGUE');
+      // Ensure league matches are numerically sorted by matchday, especially for home & away
+      matches.sort((a, b) => (a.matchday || 0) - (b.matchday || 0));
     } else if (mode === 'GROUPS') {
       const actualNumGroups = Math.ceil(teamIds.length / groupSize);
       const groups = Array.from({ length: actualNumGroups }, () => []);
@@ -527,19 +529,37 @@ export default function App() {
         groups[index % actualNumGroups].push(teamId);
       });
 
+      const groupSchedules = [];
+
       for (let g = 0; g < actualNumGroups; g++) {
         const groupTeams = groups[g];
         if (groupTeams.length > 0) {
           const groupLabel = String.fromCharCode(65 + g);
-          matches.push(...generateRoundRobin(groupTeams, 0, groupLabel, isHomeAway, 'GROUP')); // Pass stage
+          groupSchedules.push(generateRoundRobin(groupTeams, 0, groupLabel, isHomeAway, 'GROUP')); // Pass stage
         }
       }
-      // Sort matches by group (A, B, C) then by matchday (1, 2, 3) for display
-      matches.sort((a, b) => {
-        if (a.group && b.group && a.group !== b.group) return a.group.localeCompare(b.group);
-        if ((a.matchday || 0) !== (b.matchday || 0)) return (a.matchday || 0) - (b.matchday || 0);
-        return 0;
-      });
+
+      let maxMatchday = 0;
+      if (groupSchedules.length > 0) {
+        // Find the maximum matchday across all groups to iterate globally
+        maxMatchday = Math.max(...groupSchedules.map(schedule => 
+          Math.max(...schedule.map(match => match.matchday || 0))
+        ));
+      }
+
+      for (let md = 1; md <= maxMatchday; md++) {
+        const matchesForThisMatchday = [];
+        for (let g = 0; g < groupSchedules.length; g++) {
+          matchesForThisMatchday.push(...groupSchedules[g].filter(match => match.matchday === md));
+        }
+        // Within each matchday, sort matches by group label (A, B, C...)
+        // This ensures groups are ordered consistently within a matchday.
+        matchesForThisMatchday.sort((a, b) => {
+            if (a.group && b.group) return a.group.localeCompare(b.group);
+            return 0;
+        });
+        matches.push(...matchesForThisMatchday);
+      }
     } else { // KNOCKOUT
       let initialTeams = [...teamIds];
 
