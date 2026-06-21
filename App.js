@@ -51,6 +51,7 @@ export default function App() {
   const standingsRef = useRef();
   const bracketRef = useRef();
   const backPressCount = useRef(0);
+  const [searchTerm, setSearchTerm] = useState(''); // New state for search functionality
 
   // AsyncStorage Keys
   const STORAGE_KEY_LIST = '@DP_TOURNAMENT_LIST'; // Stores [{id, name, type}, ...]
@@ -340,6 +341,48 @@ export default function App() {
     for (const tourney of updatedTournamentsList) {
       await saveTournament(tourney);
     }
+  };
+
+  const handleDeleteAllData = () => {
+    Alert.alert(
+      "Delete All Data?",
+      "Are you sure you want to delete ALL tournament data? This action cannot be undone and will permanently remove all saved tournaments from your device.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete All",
+          style: "destructive",
+          onPress: async () => {
+            setLoading(true);
+            try {
+              const allKeys = await AsyncStorage.getAllKeys();
+              const tournamentDataKeys = allKeys.filter(key => 
+                key.startsWith(STORAGE_KEY_TOURNAMENT_PREFIX)
+              );
+              
+              const keysToRemove = [
+                STORAGE_KEY_LIST,
+                STORAGE_KEY_ACTIVE_ID,
+                ...tournamentDataKeys
+              ];
+
+              await AsyncStorage.multiRemove(keysToRemove);
+
+              setTournaments([]);
+              setActiveID(null);
+              setScreen('HOME');
+              showToast('All tournament data deleted successfully!');
+              setSearchTerm(''); // Clear search term after deleting all data
+            } catch (e) {
+              console.error("Failed to delete all data:", e);
+              Alert.alert("Error", "Failed to delete all data. Please try again.");
+            } finally {
+              setLoading(false);
+            }
+          }
+        }
+      ]
+    );
   };
 
   const createTournament = async () => {
@@ -923,12 +966,14 @@ export default function App() {
         )}
         <Text style={styles.logo}>DEEP<Text style={{color: COLORS.primary}}>PITCH</Text></Text>
         <View style={{flexDirection: 'row', gap: 15, alignItems: 'center'}}>
-          {screen === 'MANAGE' && (
+          {screen === 'MANAGE' ? (
             <>
               <TouchableOpacity onPress={() => exportAsPDF('FULL_REPORT')}><Icons.FileText color={COLORS.gold} size={20} /></TouchableOpacity>
               <TouchableOpacity onPress={() => shareTournament(activeT)}><Icons.Share2 color={COLORS.accent} size={20} /></TouchableOpacity>
               <TouchableOpacity onPress={() => deleteTournament(activeID)}><Icons.Trash2 color={COLORS.danger} size={20} /></TouchableOpacity>
             </>
+          ) : ( // Render delete all data icon only on HOME screen
+            <TouchableOpacity onPress={handleDeleteAllData}><Icons.Archive color={COLORS.danger} /></TouchableOpacity>
           )}
           <TouchableOpacity onPress={() => setModal(true)}><Icons.PlusCircle color={COLORS.primary} /></TouchableOpacity>
         </View>
@@ -964,45 +1009,77 @@ export default function App() {
               </View>
             </TouchableOpacity>
 
+            {/* Search Input */}
+            {tournaments.length > 0 && (
+              <TextInput
+                style={styles.searchInput}
+                placeholder="Search tournaments..."
+                placeholderTextColor="#666"
+                value={searchTerm}
+                onChangeText={setSearchTerm}
+              />
+            )}
+
             {/* Tournaments List */}
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 25, marginBottom: 15 }}>
               <Text style={[styles.sectionLabel, { marginBottom: 0 }]}>Recent Tournaments</Text>
               {tournaments.length > 0 && <Text style={{ color: COLORS.text, fontSize: 10 }}>{tournaments.length} TOTAL</Text>}
             </View>
 
-            {tournaments.length === 0 ? (
-              <View style={styles.emptyState}>
-                <View style={styles.emptyIconCircle}>
-                  <Icons.LayoutGrid color={COLORS.border} size={40} />
-                </View>
-                <Text style={styles.emptyText}>No tournaments found</Text>
-                <Text style={styles.emptySub}>Start by creating your first professional bracket or league.</Text>
-                <TouchableOpacity style={styles.emptyBtn} onPress={() => setModal(true)}>
-                  <Text style={styles.emptyBtnText}>GET STARTED</Text>
-                </TouchableOpacity>
-              </View>
-            ) : (
-              tournaments.map(t => (
-                <TouchableOpacity key={t.id} style={styles.tCard} onPress={() => selectTournament(t.id)}>
-                  <View style={styles.tCardIcon}>
-                    {(typeof t.type === 'string' && t.type === 'LEAGUE' && Icons.Trophy) ? <Icons.Trophy color={COLORS.gold} size={18} /> : 
-                     (typeof t.type === 'string' && t.type === 'KNOCKOUT' && Icons.Zap) ? <Icons.Zap color={COLORS.accent} size={18} /> : 
-                     (typeof t.type === 'string' && t.type === 'GROUPS' && Icons.LayoutGrid) ? <Icons.LayoutGrid color={COLORS.primary} size={18} /> :
-                     (Icons.CircleDot ? <Icons.CircleDot color={COLORS.muted} size={18} /> : null)}
-                  </View>
-                  <View style={{ flex: 1, marginLeft: 15 }}>
-                    <Text style={styles.tName}>{t.name}</Text>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
-                      <View style={styles.typeTag}>
-                        <Text style={styles.typeTagText}>{t.type.replace('_', ' ')}</Text>
-                      </View>
-                      <Text style={styles.tSub}>{t.teams.length} Teams</Text>
+            {(() => {
+              const filteredTournaments = tournaments.filter(t =>
+                t.name.toLowerCase().includes(searchTerm.toLowerCase())
+              );
+
+              if (tournaments.length === 0) {
+                return (
+                  <View style={styles.emptyState}>
+                    <View style={styles.emptyIconCircle}>
+                      <Icons.LayoutGrid color={COLORS.border} size={40} />
                     </View>
+                    <Text style={styles.emptyText}>No tournaments found</Text>
+                    <Text style={styles.emptySub}>Start by creating your first professional bracket or league.</Text>
+                    <TouchableOpacity style={styles.emptyBtn} onPress={() => setModal(true)}>
+                      <Text style={styles.emptyBtnText}>GET STARTED</Text>
+                    </TouchableOpacity>
                   </View>
-                  <Icons.ChevronRight color={COLORS.border} size={20} />
-                </TouchableOpacity>
-              ))
-            )}
+                );
+              } else if (filteredTournaments.length === 0) {
+                return (
+                  <View style={styles.emptyState}>
+                    <View style={styles.emptyIconCircle}>
+                      <Icons.SearchX color={COLORS.border} size={40} />
+                    </View>
+                    <Text style={styles.emptyText}>No tournaments found for "{searchTerm}"</Text>
+                    <Text style={styles.emptySub}>Try adjusting your search or clear it to see all tournaments.</Text>
+                    <TouchableOpacity style={styles.emptyBtn} onPress={() => setSearchTerm('')}>
+                      <Text style={styles.emptyBtnText}>CLEAR SEARCH</Text>
+                    </TouchableOpacity>
+                  </View>
+                );
+              } else {
+                return filteredTournaments.map(t => (
+                  <TouchableOpacity key={t.id} style={styles.tCard} onPress={() => selectTournament(t.id)}>
+                    <View style={styles.tCardIcon}>
+                      {(typeof t.type === 'string' && t.type === 'LEAGUE' && Icons.Trophy) ? <Icons.Trophy color={COLORS.gold} size={18} /> : 
+                       (typeof t.type === 'string' && t.type === 'KNOCKOUT' && Icons.Zap) ? <Icons.Zap color={COLORS.accent} size={18} /> : 
+                       (typeof t.type === 'string' && t.type === 'GROUPS' && Icons.LayoutGrid) ? <Icons.LayoutGrid color={COLORS.primary} size={18} /> :
+                       (Icons.CircleDot ? <Icons.CircleDot color={COLORS.muted} size={18} /> : null)}
+                    </View>
+                    <View style={{ flex: 1, marginLeft: 15 }}>
+                      <Text style={styles.tName}>{t.name}</Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                        <View style={styles.typeTag}>
+                          <Text style={styles.typeTagText}>{t.type.replace('_', ' ')}</Text>
+                        </View>
+                        <Text style={styles.tSub}>{t.teams.length} Teams</Text>
+                      </View>
+                    </View>
+                    <Icons.ChevronRight color={COLORS.border} size={20} />
+                  </TouchableOpacity>
+                ));
+              }
+            })()}
           </View>
         </ScrollView>
       ) : (
@@ -1032,15 +1109,23 @@ export default function App() {
                       <Text style={styles.miniBtnText}>IMAGE</Text>
                     </TouchableOpacity>
                   </View>
-                  {activeT.type === 'GROUPS' ? (
-                    [...new Set(activeT.matches.filter(m => m.stage === 'GROUP' && m.group).map(m => m.group))].map(g => (
-                      <View key={g} style={{marginBottom: 20}}>
-                        <Text style={styles.label}>Group {g}</Text>
-                        <StandingsTable data={getStats({...activeT, matches: activeT.matches.filter(m => m.stage === 'GROUP' && m.group === g)})} resolveName={(id) => getTN(id, activeT)} />
-                      </View>
-                    ))
+                  {getStats(activeT).length === 0 && activeT.matches.filter(m => m.done).length === 0 ? (
+                    <EmptyStateComponent
+                      icon={Icons.ClipboardX ? <Icons.ClipboardX color={COLORS.border} size={40} /> : null}
+                      title="No Standings Available"
+                      message="Standings will appear once matches are played and results are entered."
+                    />
                   ) : (
-                    <StandingsTable data={getStats(activeT)} resolveName={(id) => getTN(id, activeT)} />
+                    activeT.type === 'GROUPS' ? (
+                      [...new Set(activeT.matches.filter(m => m.stage === 'GROUP' && m.group).map(m => m.group))].map(g => (
+                        <View key={g} style={{marginBottom: 20}}>
+                          <Text style={styles.label}>Group {g}</Text>
+                          <StandingsTable data={getStats({...activeT, matches: activeT.matches.filter(m => m.stage === 'GROUP' && m.group === g)})} resolveName={(id) => getTN(id, activeT)} />
+                        </View>
+                      ))
+                    ) : (
+                      <StandingsTable data={getStats(activeT)} resolveName={(id) => getTN(id, activeT)} />
+                    )
                   )}
                 </View>
               )}
@@ -1048,7 +1133,7 @@ export default function App() {
               {activeTab === 'FIXTURES' && (
                 <>
                   <View style={{flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 15}}>
-                    {activeT.matches.every(m => !m.done && m.status === 'PENDING') ? (
+                    {activeT.matches.every(m => !m.done && m.status === 'PENDING') && activeT.matches.length > 0 ? (
                       <TouchableOpacity 
                         onPress={randomizeFixtures} 
                         style={[styles.miniBtn, {borderColor: COLORS.gold}]}
@@ -1070,79 +1155,103 @@ export default function App() {
                       </TouchableOpacity>
                     </View>
                   </View>
-                  {activeT.matches.map(m => (
-                  <TouchableOpacity 
-                    key={m.id} 
-                    disabled={m.away === 'BYE'}
-                    onPress={() => { setSelectedMatch(m); setMatchModal(true); }}
-                    style={[styles.match, m.away === 'BYE' && {opacity: 0.5}]}
-                  >
-                    <View style={{flex: 1}}>
-                      {m.stage === 'GROUP' && <Text style={styles.mTag}>GROUP {m.group} - MATCHDAY {m.matchday}</Text>}
-                      {m.stage === 'LEAGUE' && <Text style={styles.mTag}>MATCHDAY {m.matchday}</Text>}
-                      {m.stage === 'KNOCKOUT' && <Text style={[styles.mTag, {color: COLORS.gold}]}>ROUND {m.round}</Text>}
-                      <Text style={[styles.mTeam, {color: getTC(m.home, activeT)}]}>{getTN(m.home, activeT)}</Text>
-                    </View>
-                    {m.away !== 'BYE' ? (
-                      <View style={{alignItems: 'center', minWidth: 80}}>
-                        {m.status === 'LIVE' && (
-                          <Text style={{color: COLORS.primary, fontSize: 10, fontWeight: 'bold', marginBottom: 2}}>
-                            {Math.floor(m.time / 60)}' {m.addedTime ? `+${m.addedTime}` : ''}
-                          </Text>
-                        )}
-                        <View style={[styles.scoreBadge, m.done && {backgroundColor: COLORS.primary + '20', borderColor: COLORS.primary}, m.status === 'LIVE' && {backgroundColor: COLORS.danger + '20', borderColor: COLORS.danger}]}>
-                          <Text style={[styles.scoreText, m.done && {color: COLORS.primary}, m.status === 'LIVE' && {color: COLORS.danger}]}>
-                            {m.done || m.status === 'LIVE' ? `${m.hScore} - ${m.aScore}` : 'VS'}
-                          </Text>
+                  {activeT.matches.length === 0 ? (
+                    <EmptyStateComponent
+                      icon={Icons.CalendarX ? <Icons.CalendarX color={COLORS.border} size={40} /> : null}
+                      title="No Fixtures Generated"
+                      message="This tournament has no matches. Check your tournament configuration or try creating a new one."
+                    />
+                  ) : (
+                    activeT.matches.map(m => (
+                      <TouchableOpacity 
+                        key={m.id} 
+                        disabled={m.away === 'BYE'}
+                        onPress={() => { setSelectedMatch(m); setMatchModal(true); }}
+                        style={[styles.match, m.away === 'BYE' && {opacity: 0.5}]}
+                      >
+                        <View style={{flex: 1}}>
+                          {m.stage === 'GROUP' && <Text style={styles.mTag}>GROUP {m.group} - MATCHDAY {m.matchday}</Text>}
+                          {m.stage === 'LEAGUE' && <Text style={styles.mTag}>MATCHDAY {m.matchday}</Text>}
+                          {m.stage === 'KNOCKOUT' && <Text style={[styles.mTag, {color: COLORS.gold}]}>ROUND {m.round}</Text>}
+                          <Text style={[styles.mTeam, {color: getTC(m.home, activeT)}]}>{getTN(m.home, activeT)}</Text>
                         </View>
-                      </View>
-                    ) : (
-                      <Text style={{color: COLORS.muted, fontSize: 10, flex: 0.5, textAlign: 'center'}}>BYE</Text>
-                    )}
-                    <Text style={[styles.mTeam, {textAlign: 'right', flex: 1, color: getTC(m.away, activeT)}]}>{getTN(m.away, activeT)}</Text>
-                  </TouchableOpacity>
-                ))}
+                        {m.away !== 'BYE' ? (
+                          <View style={{alignItems: 'center', minWidth: 80}}>
+                            {m.status === 'LIVE' && (
+                              <Text style={{color: COLORS.primary, fontSize: 10, fontWeight: 'bold', marginBottom: 2}}>
+                                {Math.floor(m.time / 60)}' {m.addedTime ? `+${m.addedTime}` : ''}
+                              </Text>
+                            )}
+                            <View style={[styles.scoreBadge, m.done && {backgroundColor: COLORS.primary + '20', borderColor: COLORS.primary}, m.status === 'LIVE' && {backgroundColor: COLORS.danger + '20', borderColor: COLORS.danger}]}>
+                              <Text style={[styles.scoreText, m.done && {color: COLORS.primary}, m.status === 'LIVE' && {color: COLORS.danger}]}>
+                                {m.done || m.status === 'LIVE' ? `${m.hScore} - ${m.aScore}` : 'VS'}
+                              </Text>
+                            </View>
+                          </View>
+                        ) : (
+                          <Text style={{color: COLORS.muted, fontSize: 10, flex: 0.5, textAlign: 'center'}}>BYE</Text>
+                        )}
+                        <Text style={[styles.mTeam, {textAlign: 'right', flex: 1, color: getTC(m.away, activeT)}]}>{getTN(m.away, activeT)}</Text>
+                      </TouchableOpacity>
+                    ))
+                  )}
                 </>
               )}
 
               {activeTab === 'TEAMS' && (
-                <View style={{gap: 10}}>
-                  {activeT.teams.map(team => (
-                    <TouchableOpacity key={team.id} style={styles.tCard} onPress={() => { setEditingTeam({...team}); setTeamModal(true); }}>
-                      <View style={{flexDirection: 'row', alignItems: 'center', gap: 10}}>
-                        <View style={{width: 4, height: 30, backgroundColor: team.color || COLORS.primary, borderRadius: 2}} />
-                        <View>
-                          <Text style={styles.tName}>{team.name}</Text>
-                          <Text style={styles.tSub}>{team.players.length} Players</Text>
+                activeT.teams.length === 0 ? (
+                  <EmptyStateComponent
+                    icon={Icons.UsersX ? <Icons.UsersX color={COLORS.border} size={40} /> : null}
+                    title="No Teams Added"
+                    message="There are no teams in this tournament. This usually indicates a configuration issue during creation."
+                  />
+                ) : (
+                  <View style={{gap: 10}}>
+                    {activeT.teams.map(team => (
+                      <TouchableOpacity key={team.id} style={styles.tCard} onPress={() => { setEditingTeam({...team}); setTeamModal(true); }}>
+                        <View style={{flexDirection: 'row', alignItems: 'center', gap: 10}}>
+                          <View style={{width: 4, height: 30, backgroundColor: team.color || COLORS.primary, borderRadius: 2}} />
+                          <View>
+                            <Text style={styles.tName}>{team.name}</Text>
+                            <Text style={styles.tSub}>{team.players.length} Players</Text>
+                          </View>
                         </View>
-                      </View>
-                      <Icons.Settings2 color={COLORS.muted} size={18} />
-                    </TouchableOpacity>
-                  ))}
-                </View>
+                        <Icons.Settings2 color={COLORS.muted} size={18} />
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                )
               )}
 
               {activeTab === 'STATS' && (
-                <View style={{gap: 20}}>
-                  <View>
-                    <Text style={styles.label}>Top Scorers</Text>
-                    {scorers.map(([name, count], i) => (
-                      <View key={i} style={styles.statRow}><Text style={styles.statName}>{name}</Text><Text style={styles.statVal}>{count} G</Text></View>
-                    ))}
+                scorers.length === 0 && assisters.length === 0 && cards.length === 0 ? (
+                  <EmptyStateComponent
+                    icon={Icons.BarChartX ? <Icons.BarChartX color={COLORS.border} size={40} /> : null}
+                    title="No Player Statistics Yet"
+                    message="Player statistics will appear here after match events (goals, assists, cards) are recorded and matches are completed."
+                  />
+                ) : (
+                  <View style={{gap: 20}}>
+                    <View>
+                      <Text style={styles.label}>Top Scorers</Text>
+                      {scorers.map(([name, count], i) => (
+                        <View key={i} style={styles.statRow}><Text style={styles.statName}>{name}</Text><Text style={styles.statVal}>{count} G</Text></View>
+                      ))}
+                    </View>
+                    <View>
+                      <Text style={styles.label}>Top Assisters</Text>
+                      {assisters.map(([name, count], i) => (
+                        <View key={i} style={styles.statRow}><Text style={styles.statName}>{name}</Text><Text style={[styles.statVal, {color: COLORS.accent}]}>{count} A</Text></View>
+                      ))}
+                    </View>
+                    <View>
+                      <Text style={styles.label}>Cards Summary</Text>
+                      {cards.map(([name, count], i) => (
+                        <View key={i} style={styles.statRow}><Text style={styles.statName}>{name}</Text><Text style={[styles.statVal, {color: COLORS.danger}]}>{count} C</Text></View>
+                      ))}
+                    </View>
                   </View>
-                  <View>
-                    <Text style={styles.label}>Top Assisters</Text>
-                    {assisters.map(([name, count], i) => (
-                      <View key={i} style={styles.statRow}><Text style={styles.statName}>{name}</Text><Text style={[styles.statVal, {color: COLORS.accent}]}>{count} A</Text></View>
-                    ))}
-                  </View>
-                  <View>
-                    <Text style={styles.label}>Cards Summary</Text>
-                    {cards.map(([name, count], i) => (
-                      <View key={i} style={styles.statRow}><Text style={styles.statName}>{name}</Text><Text style={[styles.statVal, {color: COLORS.danger}]}>{count} C</Text></View>
-                    ))}
-                  </View>
-                </View>
+                )
               )}
 
               {activeTab === 'BRACKET' && (
@@ -1556,6 +1665,21 @@ const StandingsTable = ({ data, resolveName }) => (
   </View>
 );
 
+const EmptyStateComponent = ({ icon, title, message, actionText, onAction }) => (
+  <View style={styles.emptyStateTab}>
+    <View style={styles.emptyIconCircleTab}>
+      {icon}
+    </View>
+    <Text style={styles.emptyTextTab}>{title}</Text>
+    <Text style={styles.emptySubTab}>{message}</Text>
+    {actionText && onAction && (
+      <TouchableOpacity style={styles.emptyBtnTab} onPress={onAction}>
+        <Text style={styles.emptyBtnTextTab}>{actionText}</Text>
+      </TouchableOpacity>
+    )}
+  </View>
+);
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.bg },
   header: { flexDirection: 'row', justifyContent: 'space-between', padding: 20, alignItems: 'center', borderBottomWidth: 1, borderBottomColor: COLORS.card },
@@ -1591,6 +1715,65 @@ const styles = StyleSheet.create({
   emptySub: { color: COLORS.muted, textAlign: 'center', marginTop: 8, fontSize: 13, lineHeight: 18 },
   emptyBtn: { marginTop: 25, backgroundColor: COLORS.primary, paddingHorizontal: 30, paddingVertical: 12, borderRadius: 10 },
   emptyBtnText: { fontWeight: '900', color: '#000', fontSize: 12 },
+
+  // Search Input
+  searchInput: {
+    backgroundColor: COLORS.card,
+    color: '#fff',
+    padding: 12,
+    borderRadius: 12,
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+
+  // Empty State for Tabs
+  emptyStateTab: {
+    padding: 20,
+    alignItems: 'center',
+    backgroundColor: COLORS.card,
+    borderRadius: 16,
+    marginTop: 20,
+    borderStyle: 'dashed',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  emptyIconCircleTab: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: COLORS.secondary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 15,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  emptyTextTab: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  emptySubTab: {
+    color: COLORS.muted,
+    textAlign: 'center',
+    marginTop: 6,
+    fontSize: 12,
+    lineHeight: 16,
+    paddingHorizontal: 10,
+  },
+  emptyBtnTab: {
+    marginTop: 20,
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 8,
+  },
+  emptyBtnTextTab: {
+    fontWeight: '900',
+    color: '#000',
+    fontSize: 11,
+  },
 
   // Shared Styles
   label: { color: COLORS.primary, fontWeight: 'bold', marginBottom: 10, textTransform: 'uppercase', fontSize: 12 },
