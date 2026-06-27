@@ -49,7 +49,7 @@ jobs:
         run: |
           # Link project to Expo account if not already configured
           eas project:init --non-interactive
-          eas build --platform android --profile preview --local --non-interactive --output=./DeepPitch.apk
+          eas build --platform android --profile preview --local --non-interactive --clear-cache --output=./DeepPitch.apk
 
       - name: Determine Version and Tag
         id: versioning

@@ -13,23 +13,13 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.deeppitch.app",
-      "splash": {
-        "image": "./assets/logo.png",
-        "resizeMode": "contain",
-        "backgroundColor": "#050505"
-      }
+      "bundleIdentifier": "com.deeppitch.app"
     },
     "android": {
       "package": "com.deeppitch.app",
       "adaptiveIcon": {
         "backgroundColor": "#050505",
         "foregroundImage": "./assets/logo.png"
-      },
-      "splash": {
-        "image": "./assets/logo.png",
-        "resizeMode": "contain",
-        "backgroundColor": "#050505"
       }
     },
     "web": {

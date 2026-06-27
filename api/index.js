@@ -1,7 +1,7 @@
 // DeepPitch Serverless Engine
 // This file handles actions related to tournament data, including generating reports.
 
-const { COLORS, escapeHtml, getTN, getTC, getStats, getPlayerStats } = require('../../src/utils/tournamentHelpers');
+const { COLORS, escapeHtml, getTN, getTC, getStats, getPlayerStats } = require('./tournamentHelpers');
 
 // Helper to sanitize string inputs using the shared escapeHtml function
 const sanitizeString = (str) => {

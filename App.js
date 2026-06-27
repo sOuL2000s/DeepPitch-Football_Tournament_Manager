@@ -21,17 +21,25 @@ const { width } = Dimensions.get('window');
 // In development, `process.env.EXPO_PUBLIC_DEV_API_URL` should be your local IP.
 // In production, `process.env.EXPO_PUBLIC_PROD_API_URL` should be your deployed server URL.
 // Ensure these are set in your .env file (e.g., EXPO_PUBLIC_DEV_API_URL=http://192.168.1.5:3000/api)
-const DEV_URL = process.env.EXPO_PUBLIC_DEV_API_URL; 
+// Reliable Endpoint Selection
+const DEV_URL = process.env.EXPO_PUBLIC_DEV_API_URL;
 const PROD_URL = process.env.EXPO_PUBLIC_PROD_API_URL;
-let SERVERLESS_ENDPOINT = __DEV__ ? DEV_URL : PROD_URL;
 
-// Validation for local development/misconfiguration
-if (__DEV__ && !DEV_URL) {
-  console.warn("EXPO_PUBLIC_DEV_API_URL is not set in your .env file. Using a placeholder. Please configure your local API URL.");
-  SERVERLESS_ENDPOINT = 'http://10.0.2.2:3000/api'; 
-} else if (!__DEV__ && !PROD_URL) {
-  console.error("EXPO_PUBLIC_PROD_API_URL is not set for production build. API calls may fail.");
-  SERVERLESS_ENDPOINT = 'https://deeppitch-engine.vercel.app/api';
+// Use a getter to ensure we always have the freshest env value
+const getEndpoint = () => {
+  if (__DEV__) {
+    // Fallback to 10.0.2.2 (Android Emulator) if IP is not set
+    return DEV_URL || 'http://10.0.2.2:3000/api';
+  }
+  return PROD_URL || 'https://deeppitch-engine.vercel.app/api';
+};
+
+const SERVERLESS_ENDPOINT = getEndpoint();
+const SERVERLESS_API_KEY = process.env.EXPO_PUBLIC_SERVERLESS_API_KEY;
+
+if (__DEV__) {
+  console.log(`[DeepPitch] API Endpoint: ${SERVERLESS_ENDPOINT}`);
+  if (!DEV_URL) console.warn("EXPO_PUBLIC_DEV_API_URL missing in .env - using emulator fallback.");
 }
 
 export default function App() {
@@ -49,6 +57,8 @@ export default function App() {
   const [toastMessage, setToastMessage] = useState('');
   const toastTimeoutRef = useRef(null);
   const standingsRef = useRef();
+  const fixturesRef = useRef();
+  const statsRef = useRef();
   const bracketRef = useRef();
   const backPressCount = useRef(0);
   const [searchTerm, setSearchTerm] = useState(''); // New state for search functionality
@@ -888,9 +898,8 @@ export default function App() {
     if (!activeT) return;
     setLoading(true);
     try {
-      const SERVERLESS_API_KEY = process.env.EXPO_PUBLIC_SERVERLESS_API_KEY;
       if (!SERVERLESS_API_KEY) {
-        throw new Error("API key not configured for serverless endpoint.");
+        throw new Error("Missing API Key. For production, ensure EXPO_PUBLIC_SERVERLESS_API_KEY is set in EAS Secrets.");
       }
 
       const response = await fetch(SERVERLESS_ENDPOINT, {
@@ -1131,15 +1140,15 @@ export default function App() {
               )}
 
               {activeTab === 'FIXTURES' && (
-                <>
+                <View collapsable={false} ref={fixturesRef}>
                   <View style={{flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 15}}>
                     {activeT.matches.every(m => !m.done && m.status === 'PENDING') && activeT.matches.length > 0 ? (
                       <TouchableOpacity 
                         onPress={randomizeFixtures} 
-                        style={[styles.miniBtn, {borderColor: COLORS.gold}]}
+                        style={[styles.miniBtn, {borderColor: COLORS.gold, paddingHorizontal: 10}]}
                       >
                         <Icons.RefreshCw color={COLORS.gold} size={14} />
-                        <Text style={[styles.miniBtnText, {color: COLORS.gold}]}>RANDOMIZE FIXTURES</Text>
+                        <Text style={[styles.miniBtnText, {color: COLORS.gold}]}>SHUFFLE</Text>
                       </TouchableOpacity>
                     ) : (
                       <View />
@@ -1148,6 +1157,10 @@ export default function App() {
                       <TouchableOpacity onPress={() => exportAsPDF('FIXTURES')} style={styles.miniBtn}>
                         <Icons.FileText color={COLORS.accent} size={14} />
                         <Text style={styles.miniBtnText}>PDF</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity onPress={() => exportAsImage(fixturesRef, 'Fixtures')} style={styles.miniBtn}>
+                        <Icons.Image color={COLORS.gold} size={14} />
+                        <Text style={styles.miniBtnText}>IMG</Text>
                       </TouchableOpacity>
                       <TouchableOpacity onPress={exportAsCSV} style={styles.miniBtn}>
                         <Icons.Table color={COLORS.primary} size={14} />
@@ -1195,7 +1208,7 @@ export default function App() {
                       </TouchableOpacity>
                     ))
                   )}
-                </>
+                </View>
               )}
 
               {activeTab === 'TEAMS' && (
@@ -1224,7 +1237,14 @@ export default function App() {
               )}
 
               {activeTab === 'STATS' && (
-                scorers.length === 0 && assisters.length === 0 && cards.length === 0 ? (
+                <View collapsable={false} ref={statsRef}>
+                  <View style={{flexDirection: 'row', justifyContent: 'flex-end', marginBottom: 10}}>
+                    <TouchableOpacity onPress={() => exportAsImage(statsRef, 'Statistics')} style={styles.miniBtn}>
+                      <Icons.Image color={COLORS.primary} size={14} />
+                      <Text style={styles.miniBtnText}>EXPORT IMAGE</Text>
+                    </TouchableOpacity>
+                  </View>
+                  {scorers.length === 0 && assisters.length === 0 && cards.length === 0 ? (
                   <EmptyStateComponent
                     icon={Icons.BarChartX ? <Icons.BarChartX color={COLORS.border} size={40} /> : null}
                     title="No Player Statistics Yet"
@@ -1252,7 +1272,7 @@ export default function App() {
                     </View>
                   </View>
                 )
-              )}
+              }</View>)}
 
               {activeTab === 'BRACKET' && (
                 <View>
