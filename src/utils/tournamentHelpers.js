@@ -44,7 +44,7 @@ export const getStats = (tournament) => {
   // Initialize stats only for teams relevant to the current set of matches
   tournament.teams.forEach(tm => {
       if (uniqueTeamIdsInMatches.has(tm.id)) {
-          stats[tm.id] = { id: tm.id, p: 0, w: 0, d: 0, l: 0, pts: 0, gd: 0, gs: 0, fp: 0 };
+          stats[tm.id] = { id: tm.id, p: 0, w: 0, d: 0, l: 0, pts: 0, gd: 0, gs: 0, gf: 0, ga: 0, fp: 0 };
       }
   });
 
@@ -55,7 +55,10 @@ export const getStats = (tournament) => {
       const h = stats[m.home], a = stats[m.away];
       h.p++; a.p++;
       h.gs += hs; a.gs += as;
-      h.gd += (hs - as); a.gd += (as - hs);
+      h.gf += hs; h.ga += as;
+      h.gd += (hs - as); 
+      a.gf += as; a.ga += hs;
+      a.gd += (as - hs);
 
       (m.events || []).forEach(e => {
         if (e.type === 'YELLOW') { if (e.teamId === m.home) h.fp -= 1; else a.fp -= 1; }

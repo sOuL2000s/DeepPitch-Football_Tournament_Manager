@@ -35,7 +35,7 @@ const getEndpoint = () => {
 };
 
 const SERVERLESS_ENDPOINT = getEndpoint();
-const SERVERLESS_API_KEY = process.env.EXPO_PUBLIC_SERVERLESS_API_KEY;
+const SERVERLESS_API_KEY = process.env.EXPO_PUBLIC_SERVERLESS_API_KEY; // This is the correct, globally available variable
 
 if (__DEV__) {
   console.log(`[DeepPitch] API Endpoint: ${SERVERLESS_ENDPOINT}`);
@@ -224,6 +224,62 @@ export default function App() {
     await AsyncStorage.removeItem(STORAGE_KEY_ACTIVE_ID);
   };
 
+  // NEW HELPER: Truncates names to fit table columns
+  const truncateName = (name, maxLength) => {
+    if (name.length > maxLength) {
+      return name.substring(0, maxLength - 3) + "...";
+    }
+    return name;
+  };
+
+  // NEW HELPER: Generates the standings header row
+  const standingsHeader = (includePos) => {
+    const posColWidth = 4;
+    const teamNameColWidth = 18;
+    const statColWidth = 3;
+    const goalStatColWidth = 4;
+
+    let header = '';
+    if (includePos) {
+      header += 'Pos'.padEnd(posColWidth) + ' | ';
+    }
+    header +=
+      'Team'.padEnd(teamNameColWidth) + ' | ' +
+      'P'.padEnd(statColWidth) + ' | ' +
+      'W'.padEnd(statColWidth) + ' | ' +
+      'D'.padEnd(statColWidth) + ' | ' +
+      'L'.padEnd(statColWidth) + ' | ' +
+      'GF'.padEnd(goalStatColWidth) + ' | ' +
+      'GA'.padEnd(goalStatColWidth) + ' | ' +
+      'GD'.padEnd(goalStatColWidth) + ' | ' +
+      'PTS'.padEnd(statColWidth);
+    return header;
+  };
+
+  // NEW HELPER: Generates a single standings data row for a team
+  const standingsRow = (statsData, teamName, pos = null) => {
+    const posColWidth = 4;
+    const teamNameColWidth = 18;
+    const statColWidth = 3;
+    const goalStatColWidth = 4;
+
+    let row = '';
+    if (pos !== null) {
+      row += String(pos).padEnd(posColWidth) + ' | ';
+    }
+    row +=
+      truncateName(teamName, teamNameColWidth).padEnd(teamNameColWidth) + ' | ' +
+      String(statsData.p).padEnd(statColWidth) + ' | ' +
+      String(statsData.w).padEnd(statColWidth) + ' | ' +
+      String(statsData.d).padEnd(statColWidth) + ' | ' +
+      String(statsData.l).padEnd(statColWidth) + ' | ' +
+      String(statsData.gf).padEnd(goalStatColWidth) + ' | ' +
+      String(statsData.ga).padEnd(goalStatColWidth) + ' | ' +
+      String(statsData.gd).padEnd(goalStatColWidth) + ' | ' +
+      String(statsData.pts).padEnd(statColWidth);
+    return row;
+  };
+
   const saveAndSharePdf = async (base64Data, baseName) => {
     try {
       const cleanName = baseName.replace(/[^a-z0-9]/gi, '_').toLowerCase();
@@ -248,25 +304,31 @@ export default function App() {
     if (!t) return "";
     let report = `🏆 *${t.name.toUpperCase()}*\n`;
     report += `Format: ${t.type.replace('_', ' ')} | Teams: ${t.teams.length}\n`;
-    report += `----------------------------------\n\n`;
+    report += `==================================\n\n`; // More prominent separator
 
     // 1. Standings
     report += `📊 *STANDINGS*\n`;
+    report += `------------------------------------------------------------------\n`;
+
     if (t.type === 'GROUPS') {
       const groups = [...new Set(t.matches.filter(m => m.group).map(m => m.group))].sort();
       groups.forEach(g => {
         report += `\n*GROUP ${g}*\n`;
-        report += `Team | P | GD | PTS\n`;
+        const groupHeader = standingsHeader(false);
+        report += groupHeader + '\n';
+        report += '-'.repeat(groupHeader.length) + '\n';
         const groupStats = getStats({...t, matches: t.matches.filter(m => m.stage === 'GROUP' && m.group === g)});
         groupStats.forEach(([id, s]) => {
-          report += `${getTN(id, t)} | ${s.p} | ${s.gd} | ${s.pts}\n`;
+          report += standingsRow(s, getTN(id, t)) + '\n';
         });
       });
     } else {
-      report += `Pos | Team | P | GD | PTS\n`;
+      const leagueHeader = standingsHeader(true);
+      report += leagueHeader + '\n';
+      report += '-'.repeat(leagueHeader.length) + '\n';
       const stats = getStats(t);
       stats.forEach(([id, s], i) => {
-        report += `${i + 1}. ${getTN(id, t)} | ${s.p} | ${s.gd} | ${s.pts}\n`;
+        report += standingsRow(s, getTN(id, t), i + 1) + '\n';
       });
     }
     report += `\n`;
@@ -274,56 +336,84 @@ export default function App() {
     // 2. Statistics
     const { scorers, assisters, cards } = getPlayerStats(t);
     report += `⚽ *PLAYER STATISTICS*\n`;
+    report += `----------------------------------\n`;
     if (scorers.length > 0) {
-      report += `Top Scorers:\n`;
+      report += `*Top Scorers:*\n`;
       scorers.slice(0, 5).forEach(([name, count]) => report += `• ${name}: ${count} G\n`);
     }
     if (assisters.length > 0) {
-      report += `Top Assists:\n`;
+      report += `*Top Assists:*\n`;
       assisters.slice(0, 5).forEach(([name, count]) => report += `• ${name}: ${count} A\n`);
+    }
+    if (cards.length > 0) {
+        report += `*Cards Summary:*\n`;
+        cards.slice(0, 5).forEach(([name, count]) => report += `• ${name}: ${count} Cards\n`);
     }
     report += `\n`;
 
     // 3. Fixtures & Results
     report += `🗓️ *FIXTURES & RESULTS*\n`;
-    const sortedMatches = [...t.matches].sort((a, b) => {
-      // Primary sort by stage
-      const stageOrder = { 'LEAGUE': 0, 'GROUP': 1, 'KNOCKOUT': 2 };
-      if (stageOrder[a.stage] !== stageOrder[b.stage]) {
-        return stageOrder[a.stage] - stageOrder[b.stage];
-      }
-      // Secondary sort: group then matchday for group matches, round for knockout
-      if (a.stage === 'GROUP' && b.stage === 'GROUP') {
-        if (a.group !== b.group) return (a.group || "").localeCompare(b.group || "");
-        return (a.matchday || 0) - (b.matchday || 0);
-      }
-      if (a.stage === 'KNOCKOUT' && b.stage === 'KNOCKOUT') {
-        return (a.round || 0) - (b.round || 0);
-      }
-      return 0; // Fallback for LEAGUE or mixed stages
+    report += `----------------------------------\n`;
+
+    // Group matches first by stage, then within stages by group/round.
+    const groupedMatches = {};
+    t.matches.forEach(m => {
+        const key = m.stage === 'KNOCKOUT' ? `Knockout - Round ${m.round}` : 
+                    m.stage === 'GROUP' ? `Group ${m.group} - Matchday ${m.matchday}` : 
+                    `League - Matchday ${m.matchday}`;
+        if (!groupedMatches[key]) groupedMatches[key] = [];
+        groupedMatches[key].push(m);
     });
 
-    sortedMatches.forEach(m => {
-      if (m.away === 'BYE') return;
-      let matchTypeLabel;
-      if (m.stage === 'GROUP') matchTypeLabel = `Group ${m.group}, Matchday ${m.matchday}`;
-      else if (m.stage === 'KNOCKOUT') matchTypeLabel = `Round ${m.round}`;
-      else matchTypeLabel = `Matchday ${m.matchday}`; // LEAGUE
-      
-      const score = m.done ? `${m.hScore} - ${m.aScore}` : (m.status === 'LIVE' ? "LIVE" : "VS");
-      report += `[${matchTypeLabel}] ${getTN(m.home, t)} ${score} ${getTN(m.away, t)}\n`;
-      if (m.events && m.events.length > 0) {
-        m.events.forEach(e => {
-          report += `  - ${e.type}: ${e.player} (${getTN(e.teamId, t)})\n`;
+    const sortedKeys = Object.keys(groupedMatches).sort((a, b) => {
+        const stageOrder = { 'League': 0, 'Group': 1, 'Knockout': 2 };
+        const getOrder = (key) => {
+            if (key.startsWith('League')) return stageOrder.League;
+            if (key.startsWith('Group')) return stageOrder.Group;
+            if (key.startsWith('Knockout')) return stageOrder.Knockout;
+            return 99;
+        };
+
+        const orderA = getOrder(a);
+        const orderB = getOrder(b);
+
+        if (orderA !== orderB) return orderA - orderB;
+
+        const numA = parseInt(a.match(/\d+/)[0]);
+        const numB = parseInt(b.match(/\d+/)[0]);
+        if (numA !== numB) return numA - numB;
+        
+        if (a.startsWith('Group') && b.startsWith('Group')) {
+            const groupA = a.split(' - ')[0];
+            const groupB = b.split(' - ')[0];
+            return groupA.localeCompare(groupB);
+        }
+
+        return 0;
+    });
+
+    sortedKeys.forEach(key => {
+        report += `\n*${key}*\n`;
+        groupedMatches[key].sort((a,b) => {
+            return a.id.localeCompare(b.id);
+        }).forEach(m => {
+          if (m.away === 'BYE') return;
+          const score = m.done ? `${m.hScore} - ${m.aScore}` : (m.status === 'LIVE' ? "LIVE" : "VS");
+          report += `• ${getTN(m.home, t)} ${score} ${getTN(m.away, t)}\n`;
+          if (m.events && m.events.length > 0) {
+            m.events.forEach(e => {
+              report += `  - ${e.type}: ${e.player} (${getTN(e.teamId, t)})\n`;
+            });
+          }
         });
-      }
     });
     report += `\n`;
 
     // 4. Rosters
     report += `👥 *TEAM ROSTERS*\n`;
+    report += `----------------------------------\n`;
     t.teams.forEach(team => {
-      report += `*${team.name}*: ${team.players.map(p => `${p.name}`).join(', ')}\n`;
+      report += `*${team.name}*: ${team.players.map(p => `${p.name} (#${p.number || 'N/A'})`).join(', ')}\n`;
     });
 
     report += `\n_Generated by DEEPPITCH_`;
@@ -931,8 +1021,7 @@ export default function App() {
     if (!activeT) return;
     setLoading(true);
     try {
-      const SERVERLESS_API_KEY = process.env.EXPO_PUBLIC_SERVERLESS_API_KEY;
-      if (!SERVERLESS_API_KEY) {
+      if (!SERVERLESS_API_KEY) { // USE THE MODULE-LEVEL VARIABLE
         throw new Error("API key not configured for serverless endpoint.");
       }
       
@@ -940,7 +1029,7 @@ export default function App() {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${SERVERLESS_API_KEY}`
+          'Authorization': `Bearer ${SERVERLESS_API_KEY}` // USE THE MODULE-LEVEL VARIABLE
         },
         body: JSON.stringify({ action: 'GENERATE_PDF_HTML', tournament: activeT, type: type }),
       });
@@ -1126,14 +1215,41 @@ export default function App() {
                     />
                   ) : (
                     activeT.type === 'GROUPS' ? (
-                      [...new Set(activeT.matches.filter(m => m.stage === 'GROUP' && m.group).map(m => m.group))].map(g => (
-                        <View key={g} style={{marginBottom: 20}}>
-                          <Text style={styles.label}>Group {g}</Text>
-                          <StandingsTable data={getStats({...activeT, matches: activeT.matches.filter(m => m.stage === 'GROUP' && m.group === g)})} resolveName={(id) => getTN(id, activeT)} />
-                        </View>
-                      ))
+                      <View style={styles.table}>
+                        {[...new Set(activeT.matches.filter(m => m.stage === 'GROUP' && m.group).map(m => m.group))].sort().map(g => {
+                          const groupStats = getStats({...activeT, matches: activeT.matches.filter(m => m.stage === 'GROUP' && m.group === g)});
+                          const qualifiersCount = parseInt(activeT.config?.qualifiersCount || 0, 10);
+                          return (
+                            <View key={g} style={{marginBottom: 20}}>
+                              <Text style={styles.groupTitle}>Group {g}</Text>
+                              <StandingsHeader includePos={false} />
+                              {groupStats.map((item, index) => (
+                                <StandingsItem 
+                                  key={item[0]} 
+                                  item={item} 
+                                  index={index} 
+                                  resolveName={(id) => getTN(id, activeT)} 
+                                  includePos={false} 
+                                  isQualified={qualifiersCount > 0 && index < qualifiersCount}
+                                />
+                              ))}
+                            </View>
+                          );
+                        })}
+                      </View>
                     ) : (
-                      <StandingsTable data={getStats(activeT)} resolveName={(id) => getTN(id, activeT)} />
+                      <View style={styles.table}>
+                        <StandingsHeader includePos={true} />
+                        {getStats(activeT).map((item, index) => (
+                          <StandingsItem 
+                            key={item[0]} 
+                            item={item} 
+                            index={index} 
+                            resolveName={(id) => getTN(id, activeT)} 
+                            includePos={true} 
+                          />
+                        ))}
+                      </View>
                     )
                   )}
                 </View>
@@ -1673,17 +1789,64 @@ export default function App() {
   );
 }
 
-const StandingsTable = ({ data, resolveName }) => (
-  <View style={styles.table}>
-    <View style={styles.row}><Text style={[styles.cell, {flex: 2, textAlign: 'left'}]}>TEAM</Text><Text style={styles.cell}>P</Text><Text style={styles.cell}>GD</Text><Text style={styles.cell}>PTS</Text></View>
-    {data.map(([id, s], i) => (
-      <View key={i} style={[styles.row, {borderTopWidth: 1, borderColor: COLORS.border}]}>
-        <Text style={[styles.cell, {flex: 2, textAlign: 'left', color: i < 2 ? COLORS.primary : COLORS.text}]}>{resolveName ? resolveName(id) : id}</Text>
-        <Text style={styles.cell}>{s.p}</Text><Text style={styles.cell}>{s.gd}</Text><Text style={styles.cell}>{s.pts}</Text>
-      </View>
-    ))}
-  </View>
-);
+const StandingsHeader = ({ includePos = true }) => {
+  const colFlex = {
+    pos: 0.5,
+    team: 2.5,
+    p: 0.5,
+    w: 0.5,
+    d: 0.5,
+    l: 0.5,
+    gf: 0.6,
+    ga: 0.6,
+    gd: 0.6,
+    pts: 0.6
+  };
+
+  return (
+    <View style={[styles.standingsRow, styles.standingsHeader]}>
+      {includePos && <Text style={[styles.standingsCell, { flex: colFlex.pos, color: COLORS.text }]}>Pos</Text>}
+      <Text style={[styles.standingsCell, { flex: colFlex.team, textAlign: 'left', paddingLeft: 5, color: COLORS.text }]}>Team</Text>
+      <Text style={[styles.standingsCell, { flex: colFlex.p, color: COLORS.text }]}>P</Text>
+      <Text style={[styles.standingsCell, { flex: colFlex.w, color: COLORS.text }]}>W</Text>
+      <Text style={[styles.standingsCell, { flex: colFlex.d, color: COLORS.text }]}>D</Text>
+      <Text style={[styles.standingsCell, { flex: colFlex.l, color: COLORS.text }]}>L</Text>
+      <Text style={[styles.standingsCell, { flex: colFlex.gd, color: COLORS.text }]}>GD</Text>
+      <Text style={[styles.standingsCell, { flex: colFlex.pts, color: COLORS.text }]}>PTS</Text>
+    </View>
+  );
+};
+
+const StandingsItem = ({ item, index, resolveName, includePos = true, isQualified = false }) => {
+  const [teamId, stats] = item;
+  const teamName = resolveName(teamId);
+
+  const colFlex = {
+    pos: 0.5,
+    team: 2.5,
+    p: 0.5,
+    w: 0.5,
+    d: 0.5,
+    l: 0.5,
+    gf: 0.6,
+    ga: 0.6,
+    gd: 0.6,
+    pts: 0.6
+  };
+
+  return (
+    <View style={[styles.standingsRow, { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: COLORS.border }]}>
+      {includePos && <Text style={[styles.standingsCell, { flex: colFlex.pos, fontWeight: 'bold', color: isQualified ? COLORS.gold : COLORS.muted }]}>{index + 1}.</Text>}
+      <Text style={[styles.standingsCell, { flex: colFlex.team, fontWeight: 'bold', textAlign: 'left', paddingLeft: 5, color: isQualified ? COLORS.primary : COLORS.text }]} numberOfLines={1}>{teamName}</Text>
+      <Text style={[styles.standingsCell, { flex: colFlex.p }]}>{stats.p}</Text>
+      <Text style={[styles.standingsCell, { flex: colFlex.w }]}>{stats.w}</Text>
+      <Text style={[styles.standingsCell, { flex: colFlex.d }]}>{stats.d}</Text>
+      <Text style={[styles.standingsCell, { flex: colFlex.l }]}>{stats.l}</Text>
+      <Text style={[styles.standingsCell, { flex: colFlex.gd }]}>{stats.gd}</Text>
+      <Text style={[styles.standingsCell, { flex: colFlex.pts, color: isQualified ? COLORS.gold : COLORS.primary }]}>{stats.pts}</Text>
+    </View>
+  );
+};
 
 const EmptyStateComponent = ({ icon, title, message, actionText, onAction }) => (
   <View style={styles.emptyStateTab}>
@@ -1849,5 +2012,40 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 14,
     fontWeight: '500',
+  },
+
+  // NEW STANDINGS STYLES
+  groupTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginTop: 15,
+    marginBottom: 10,
+    color: COLORS.primary,
+  },
+  standingsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 8,
+    // Note: borderBottomWidth is typically handled by items, header will have a full border.
+    backgroundColor: COLORS.card,
+  },
+  standingsHeader: {
+    backgroundColor: COLORS.secondary,
+    paddingVertical: 10,
+    borderWidth: 1, // Full border for the header
+    borderColor: COLORS.border,
+    borderTopLeftRadius: 10,
+    borderTopRightRadius: 10,
+  },
+  standingsCell: {
+    fontSize: 12,
+    color: COLORS.text,
+    textAlign: 'center',
+  },
+  standingsDivider: { // This divider might be redundant if rows have bottom borders and header has its own.
+    height: 0,
+    backgroundColor: 'transparent',
+    marginVertical: 0,
   },
 });
