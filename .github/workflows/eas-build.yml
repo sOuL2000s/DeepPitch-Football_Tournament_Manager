@@ -12,6 +12,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env: # Set EXPO_TOKEN at the job level for all steps to access
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
 
     steps:
       - name: Checkout code
@@ -20,7 +22,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: 18
+          node-version: 22 # Changed from 18 to 22 (or higher) to meet dependency requirements
           cache: 'npm'
 
       - name: Install dependencies
@@ -29,10 +31,10 @@ jobs:
       - name: Install EAS CLI
         run: npm install -g eas-cli
 
-      - name: Login to Expo
-        run: eas login --token ${{ secrets.EXPO_TOKEN }}
+      # Removed the 'Login to Expo' step.
+      # EAS CLI automatically authenticates using the EXPO_TOKEN environment variable set at the job level.
 
       - name: Build Android App (Production)
         run: eas build --platform android --profile production --clear-cache
         env:
-          NODE_ENV: production
+          NODE_ENV: production # This environment variable is specific to this step
